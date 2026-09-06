@@ -5370,7 +5370,9 @@ export default class BfmAutotagPlugin extends Plugin {
 
         if (this.settings.geolocationEnabled) {
             this.getGeolocationProperties().forEach(mapping => {
-                properties.add(this.normalizePropertyName(mapping.property, this.getDefaultGeolocationPropertyName(mapping.field)));
+                if (!this.isScalarGeolocationMapping(mapping)) {
+                    properties.add(this.normalizePropertyName(mapping.property, this.getDefaultGeolocationPropertyName(mapping.field)));
+                }
             });
         }
 
@@ -5383,6 +5385,11 @@ export default class BfmAutotagPlugin extends Plugin {
         }
 
         return properties;
+    }
+
+    isScalarGeolocationMapping(mapping: GeolocationPropertyMapping): boolean {
+        return !mapping.format.trim()
+            && (mapping.field === "latitude" || mapping.field === "longitude" || mapping.field === "altitude");
     }
 
     getGeneratedPropertyNames(): Set<string> {
