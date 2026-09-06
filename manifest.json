@@ -1,11 +1,10 @@
 {
-	"id": "sample-plugin",
-	"name": "Sample Plugin",
-	"version": "1.0.0",
+	"id": "marus-autotag",
+	"name": "Maru's Autotag",
+	"version": "0.1.0",
 	"minAppVersion": "0.15.0",
-	"description": "Demonstrates some of the capabilities of the Obsidian API.",
-	"author": "Obsidian",
-	"authorUrl": "https://obsidian.md",
-	"fundingUrl": "https://obsidian.md/pricing",
+	"description": "Autotag companion notes created by Binary File Manager using folder tags, AI tags, geolocation, duplicate protection, and recovery tools.",
+	"author": "maruXmaruTV",
+	"authorUrl": "https://maruxmaru.tv",
 	"isDesktopOnly": false
 }

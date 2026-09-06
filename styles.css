@@ -6,3 +6,1681 @@ available in the app when your plugin is enabled.
 If your plugin does not need CSS, delete this file.
 
 */
+.bfm-autotag-danger-button {
+    color: var(--text-on-accent) !important;
+    background-color: var(--background-modifier-error) !important;
+    border-color: var(--background-modifier-error) !important;
+}
+
+.bfm-autotag-danger-button:hover {
+    color: var(--text-on-accent) !important;
+    background-color: var(--text-error) !important;
+    border-color: var(--text-error) !important;
+}
+
+.bfm-autotag-success-button {
+    color: var(--text-on-accent) !important;
+    background-color: var(--text-success, #3ba55d) !important;
+    border-color: var(--text-success, #3ba55d) !important;
+}
+
+.bfm-autotag-success-button:hover {
+    color: var(--text-on-accent) !important;
+    background-color: color-mix(in srgb, var(--text-success, #3ba55d) 82%, black) !important;
+    border-color: color-mix(in srgb, var(--text-success, #3ba55d) 82%, black) !important;
+}
+
+.bfm-autotag-context-menu-heading {
+    display: inline-flex;
+    align-items: center;
+    color: var(--interactive-accent);
+    font-size: inherit;
+    font-weight: inherit;
+    letter-spacing: 0;
+}
+
+.bfm-autotag-context-menu-action {
+    display: inline-flex;
+    align-items: center;
+}
+
+.menu-item.is-label .bfm-autotag-context-menu-heading {
+    color: var(--interactive-accent);
+}
+
+.menu-item:has(.bfm-autotag-context-menu-action) {
+    position: relative;
+    padding-left: calc(var(--size-4-3, 12px) + 12px);
+}
+
+.menu-item:has(.bfm-autotag-context-menu-action)::before {
+    content: "";
+    position: absolute;
+    left: 16px;
+    top: 0;
+    bottom: 0;
+    width: 1px;
+    background: color-mix(in srgb, var(--interactive-accent) 42%, var(--background-modifier-border));
+    opacity: 0.8;
+}
+
+.bfm-autotag-duplicate-preview-row {
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+    flex-wrap: wrap;
+    margin: 12px 0;
+}
+
+.bfm-autotag-duplicate-preview {
+    flex: 1 1 0;
+    min-width: 0;
+}
+
+.bfm-autotag-duplicate-preview img {
+    max-width: 200px;
+    max-height: 200px;
+    object-fit: contain;
+    border-radius: 6px;
+}
+
+.bfm-autotag-duplicate-preview p {
+    overflow-wrap: anywhere;
+}
+
+.bfm-autotag-duplicate-note-preview {
+    max-height: 220px;
+    overflow: auto;
+    white-space: pre-wrap;
+}
+
+.bfm-autotag-duplicate-processing-status-wrap {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: -2px 0 10px;
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.bfm-autotag-duplicate-processing-status-label {
+    font-weight: 600;
+}
+
+.bfm-autotag-duplicate-processing-status {
+    display: inline-flex;
+    align-items: center;
+    min-height: 20px;
+    padding: 2px 8px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 999px;
+    background: var(--background-primary);
+    color: var(--text-muted);
+    transition: background-color 180ms ease, border-color 180ms ease, color 180ms ease;
+}
+
+.bfm-autotag-duplicate-processing-status.is-success {
+    border-color: color-mix(in srgb, var(--text-success, #3ba55d) 55%, transparent);
+    background: color-mix(in srgb, var(--text-success, #3ba55d) 14%, transparent);
+    color: var(--text-success, #3ba55d);
+}
+
+.bfm-autotag-duplicate-processing-status.is-warning {
+    border-color: color-mix(in srgb, var(--text-warning, #f08c00) 55%, transparent);
+    background: color-mix(in srgb, var(--text-warning, #f08c00) 14%, transparent);
+    color: var(--text-warning, #f08c00);
+}
+
+.bfm-autotag-duplicate-processing-status.is-danger {
+    border-color: color-mix(in srgb, var(--text-error) 55%, transparent);
+    background: color-mix(in srgb, var(--text-error) 14%, transparent);
+    color: var(--text-error);
+}
+
+.bfm-autotag-duplicate-processing-status.is-accent {
+    border-color: color-mix(in srgb, var(--interactive-accent) 55%, transparent);
+    background: color-mix(in srgb, var(--interactive-accent) 14%, transparent);
+    color: var(--interactive-accent);
+}
+
+.bfm-autotag-duplicate-status-spinner {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 14px;
+    height: 14px;
+    margin-right: 5px;
+    color: var(--interactive-accent);
+}
+
+.bfm-autotag-duplicate-status-spinner svg {
+    width: 13px;
+    height: 13px;
+    animation: bfm-autotag-spin 900ms linear infinite;
+}
+
+.bfm-autotag-manual-pair-preview-row {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+    margin: 12px 0;
+}
+
+.bfm-autotag-manual-pair-card {
+    min-width: 0;
+    padding: 12px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 8px;
+    background: var(--background-secondary);
+}
+
+.bfm-autotag-manual-pair-card-source {
+    border-top: 4px solid var(--interactive-accent);
+}
+
+.bfm-autotag-manual-pair-card-note {
+    border-top: 4px solid var(--text-success, #3ba55d);
+}
+
+.bfm-autotag-manual-pair-card h3 {
+    margin: 0 0 10px;
+}
+
+.bfm-autotag-manual-pair-image-wrap {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 190px;
+    margin-bottom: 10px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 6px;
+    background: var(--background-primary);
+}
+
+.bfm-autotag-manual-pair-image-wrap img {
+    max-width: 220px;
+    max-height: 200px;
+    object-fit: contain;
+}
+
+.bfm-autotag-manual-pair-preview-fallback {
+    padding: 12px;
+    color: var(--text-muted);
+    text-align: center;
+}
+
+.bfm-autotag-manual-pair-meta-line {
+    margin-top: 5px;
+    overflow-wrap: anywhere;
+}
+
+.bfm-autotag-manual-pair-warning {
+    margin: 10px 0;
+    padding: 8px 10px;
+    border-left: 4px solid var(--text-warning, #f08c00);
+    border-radius: 6px;
+    background: rgba(240, 140, 0, 0.1);
+    color: var(--text-normal);
+}
+
+.bfm-autotag-manual-pair-note-preview {
+    max-height: 260px;
+    margin: 10px 0 0;
+    padding: 8px;
+    overflow: auto;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 6px;
+    background: var(--background-primary);
+    white-space: pre-wrap;
+}
+
+@media (max-width: 760px) {
+    .bfm-autotag-manual-pair-preview-row {
+        grid-template-columns: 1fr;
+    }
+}
+
+
+
+.bfm-autotag-how-panel {
+    display: flow-root;
+    margin: 0 0 12px;
+    padding: 10px 12px;
+    border: 1px solid rgba(240, 140, 0, 0.28);
+    border-left: 4px solid var(--text-warning, #f08c00);
+    border-radius: 7px;
+    background: rgba(240, 140, 0, 0.08);
+}
+
+.bfm-autotag-how-panel-warning {
+    border-left-color: var(--text-warning, #f08c00);
+}
+
+.bfm-autotag-how-panel p {
+    margin: 6px 0 0;
+}
+
+.bfm-autotag-settings-tab {
+    scroll-behavior: smooth;
+}
+
+
+.bfm-autotag-settings-tab .setting-item,
+.bfm-autotag-settings-tab details,
+.bfm-autotag-settings-tab button,
+.bfm-autotag-settings-tab input,
+.bfm-autotag-settings-tab textarea,
+.bfm-autotag-settings-tab select {
+    transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease, opacity 160ms ease, transform 160ms ease, box-shadow 160ms ease;
+}
+
+
+.bfm-autotag-settings-tab .setting-item-control {
+    transition: gap 160ms ease, opacity 160ms ease, transform 160ms ease;
+}
+
+
+
+.bfm-autotag-subcategory {
+    margin: 0;
+    padding: 0;
+    border-left: none;
+}
+
+.bfm-autotag-local-refreshing,
+.bfm-autotag-local-refreshed {
+    transition: height 420ms cubic-bezier(0.22, 1, 0.36, 1), opacity 240ms ease, transform 260ms ease;
+}
+
+.bfm-autotag-local-refreshing {
+    opacity: 0;
+    transform: translateY(-6px);
+}
+
+.bfm-autotag-local-refreshed {
+    animation: bfm-autotag-soft-enter 320ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.bfm-autotag-animated-section-body {
+    opacity: 1;
+    transform: translateY(0);
+}
+
+
+
+@keyframes bfm-autotag-soft-enter {
+    from {
+        opacity: 0;
+        transform: translateY(8px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+
+.bfm-autotag-settings-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 10px 0 14px;
+    padding: 6px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 8px;
+    background: var(--background-secondary);
+}
+
+.bfm-autotag-settings-tabs button {
+    appearance: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 28px;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12), 0 1px 2px rgba(0, 0, 0, 0.22);
+    outline: none;
+    font-size: 12px;
+    font-weight: 500;
+    line-height: 1.2;
+    padding: 5px 9px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 7px;
+    color: var(--text-normal);
+    background: var(--interactive-normal);
+}
+
+.bfm-autotag-tab-icon,
+.bfm-autotag-heading-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    color: currentColor;
+}
+
+.bfm-autotag-tab-icon svg {
+    width: 13px;
+    height: 13px;
+    stroke-width: 2.2;
+}
+
+.bfm-autotag-heading-icon svg {
+    width: 15px;
+    height: 15px;
+    stroke-width: 2.1;
+}
+
+.bfm-autotag-heading-label,
+.bfm-autotag-tab-label {
+    min-width: 0;
+}
+
+.bfm-autotag-settings-tabs button:hover,
+.bfm-autotag-settings-tabs button:focus,
+.bfm-autotag-settings-tabs button:focus-visible {
+    color: var(--text-normal);
+    background: var(--interactive-hover);
+    border-color: var(--background-modifier-border-hover);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16), 0 3px 8px rgba(0, 0, 0, 0.24);
+    outline: none;
+    transform: translateY(-1px);
+}
+
+.bfm-autotag-settings-tabs button.is-active,
+.bfm-autotag-settings-tabs button.is-active:hover,
+.bfm-autotag-settings-tabs button.is-active:focus,
+.bfm-autotag-settings-tabs button.is-active:focus-visible {
+    color: var(--text-on-accent);
+    background: var(--interactive-accent);
+    border-color: var(--interactive-accent);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.16), 0 3px 8px rgba(0, 0, 0, 0.24);
+    outline: none;
+    transform: translateY(-1px);
+}
+
+.bfm-autotag-settings-search-results button {
+    font-size: 12px;
+    padding: 5px 9px;
+    border-radius: 7px;
+    border: 1px solid transparent;
+    background: transparent;
+    color: var(--text-muted);
+}
+
+.bfm-autotag-settings-search-results button:hover,
+.bfm-autotag-settings-search-results button:focus,
+.bfm-autotag-settings-search-results button:focus-visible {
+    color: var(--text-normal);
+    background: var(--background-modifier-hover);
+    box-shadow: none;
+    outline: none;
+}
+
+.bfm-autotag-settings-search {
+    margin: 8px 0 10px;
+}
+
+.bfm-autotag-settings-search-results {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 6px 0 10px;
+    padding-left: 2px;
+}
+
+.bfm-autotag-settings-tab-content {
+    animation: bfm-autotag-soft-enter 220ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.bfm-autotag-settings-section.is-active {
+    animation: bfm-autotag-soft-enter 260ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.bfm-autotag-settings-section > h3:first-child {
+    margin-top: 12px;
+}
+
+.bfm-autotag-settings-tab input[type="range"] {
+    accent-color: var(--interactive-accent);
+}
+
+.bfm-autotag-settings-tab .setting-item .setting-item-description {
+    max-height: 0;
+    margin-top: 0;
+    opacity: 0;
+    overflow: hidden;
+    transform: translateY(-3px);
+    transition: max-height 260ms cubic-bezier(0.22, 1, 0.36, 1), opacity 180ms ease, margin-top 180ms ease, transform 200ms ease;
+}
+
+
+
+.bfm-autotag-settings-tab .setting-item:has(input[type="checkbox"]) {
+    border-left: 3px solid var(--text-error);
+    padding-left: 8px;
+}
+
+.bfm-autotag-settings-tab .setting-item:has(input[type="checkbox"]:checked) {
+    border-left-color: var(--text-success, #3ba55d);
+}
+
+.bfm-autotag-settings-tab input[type="range"]::-webkit-slider-runnable-track {
+    height: 5px;
+    border-radius: 999px;
+    background: linear-gradient(90deg, #2f9e44 0%, #f2c94c 55%, #d94848 100%);
+}
+
+.bfm-autotag-settings-tab input[type="range"]::-webkit-slider-thumb {
+    margin-top: -5px;
+}
+
+/* Settings organization polish */
+.bfm-autotag-settings-tab .setting-item {
+    background: transparent;
+}
+
+.bfm-autotag-settings-tab .setting-item .setting-item-description {
+    max-height: 0;
+    margin-top: 0;
+    opacity: 0;
+    overflow: hidden;
+    transform: translateY(-3px);
+}
+
+
+
+.bfm-autotag-settings-tab .setting-item:has(.checkbox-container) {
+    border-left: 3px solid var(--text-error);
+    padding-left: 8px;
+}
+
+.bfm-autotag-settings-tab .setting-item:has(.checkbox-container.is-enabled) {
+    border-left-color: var(--text-success, #3ba55d);
+}
+
+.bfm-autotag-settings-tab input[type="range"] {
+    -webkit-appearance: none;
+    appearance: none;
+    min-width: 150px;
+}
+
+.bfm-autotag-settings-tab input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 14px;
+    height: 14px;
+    margin-top: -5px;
+    border: 0;
+    background: var(--interactive-accent);
+    clip-path: polygon(50% 0, 100% 100%, 0 100%);
+    cursor: pointer;
+}
+
+.bfm-autotag-settings-tab input[type="range"]::-moz-range-thumb {
+    width: 14px;
+    height: 14px;
+    border: 0;
+    border-radius: 0;
+    background: var(--interactive-accent);
+    clip-path: polygon(50% 0, 100% 100%, 0 100%);
+    cursor: pointer;
+}
+
+.bfm-autotag-settings-search-results-list {
+    display: block;
+}
+
+.bfm-autotag-settings-search-results-list h4 {
+    margin: 12px 0 6px;
+    color: var(--text-muted);
+    font-size: 12px;
+    font-weight: 650;
+}
+
+.bfm-autotag-settings-search-results-list button {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    width: 100%;
+    margin: 4px 0;
+    text-align: left;
+}
+
+.bfm-autotag-settings-search-result-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    color: var(--text-muted);
+}
+
+.bfm-autotag-settings-search-result-icon svg {
+    width: 14px;
+    height: 14px;
+    stroke-width: 2.1;
+}
+
+.bfm-autotag-settings-search-result-text {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.bfm-autotag-settings-search-result-name {
+    color: var(--text-normal);
+}
+
+.bfm-autotag-settings-search-result-section {
+    color: var(--text-muted);
+}
+
+.bfm-autotag-settings-search-result-excerpt {
+    margin-top: 2px;
+    color: var(--text-faint);
+    font-size: 11px;
+    line-height: 1.25;
+}
+
+.bfm-autotag-settings-profile-panel {
+    display: block;
+}
+
+.bfm-autotag-settings-profile-dropzone {
+    margin-top: 10px;
+    padding: 14px 12px;
+    border: 1px dashed var(--background-modifier-border-hover);
+    border-radius: 7px;
+    background: color-mix(in srgb, var(--interactive-normal) 18%, transparent);
+    text-align: center;
+    transition: background-color 180ms ease, border-color 180ms ease, box-shadow 180ms ease;
+}
+
+.bfm-autotag-settings-profile-dropzone.is-dragover,
+.bfm-autotag-settings-profile-dropzone:hover {
+    border-color: var(--interactive-accent);
+    background: color-mix(in srgb, var(--interactive-accent) 12%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--interactive-accent) 24%, transparent);
+}
+
+.bfm-autotag-settings-profile-dropzone-title {
+    color: var(--text-normal);
+    font-weight: 650;
+}
+
+.bfm-autotag-settings-profile-video {
+    margin-top: 10px;
+    padding: 10px;
+    border: 1px solid var(--background-modifier-border);
+    border-left: 4px solid var(--interactive-accent);
+    border-radius: 7px;
+    background: color-mix(in srgb, var(--interactive-normal) 22%, transparent);
+}
+
+.bfm-autotag-settings-profile-video-header {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    color: var(--text-normal);
+    font-weight: 650;
+}
+
+.bfm-autotag-settings-profile-video-placeholder {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 120px;
+    margin-top: 8px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 6px;
+    background: var(--background-primary-alt, var(--background-primary));
+    color: var(--text-muted);
+}
+
+.bfm-autotag-back-to-top {
+    display: flex;
+    justify-content: flex-end;
+    margin: 18px 0 4px;
+}
+
+.bfm-autotag-back-to-top button {
+    padding: 5px 10px;
+    border-radius: 7px;
+}
+
+/* Flicker and control fixes */
+.bfm-autotag-settings-tab-content,
+.bfm-autotag-settings-section.is-active {
+    animation: none !important;
+}
+
+.bfm-autotag-settings-tab input[type="range"]::-webkit-slider-thumb {
+    clip-path: polygon(0 0, 100% 0, 50% 100%);
+}
+
+.bfm-autotag-settings-tab input[type="range"]::-moz-range-thumb {
+    clip-path: polygon(0 0, 100% 0, 50% 100%);
+}
+
+.bfm-autotag-settings-tab .setting-item:has(.checkbox-container) {
+    border-left-color: var(--text-error) !important;
+}
+
+.bfm-autotag-settings-tab .setting-item:has(.checkbox-container.is-enabled) {
+    border-left-color: var(--text-success, #3ba55d) !important;
+}
+
+/* Consistent section surface */
+.bfm-autotag-settings-section {
+    padding: 10px 12px 12px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 8px;
+    background: var(--background-primary);
+}
+
+.bfm-autotag-settings-section > h3:first-child {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    margin-top: 0;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.bfm-autotag-settings-section .setting-item {
+    border-radius: 6px;
+}
+
+.bfm-autotag-settings-section .setting-item:hover {
+    background: var(--background-modifier-hover);
+}
+
+/* JS-managed info hover animation */
+.bfm-autotag-settings-tab .setting-item-name::after {
+    content: none !important;
+}
+
+.bfm-autotag-info-trigger {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 14px;
+    height: 14px;
+    margin-left: 6px;
+    border: 1px solid var(--text-faint);
+    border-radius: 999px;
+    color: var(--text-muted);
+    font-size: 10px;
+    font-weight: 600;
+    line-height: 1;
+    vertical-align: middle;
+    cursor: help;
+    user-select: none;
+}
+
+.bfm-autotag-info-trigger:hover,
+.bfm-autotag-info-trigger:focus {
+    color: var(--text-normal);
+    border-color: var(--interactive-accent);
+    outline: none;
+}
+
+.bfm-autotag-settings-tab .setting-item .setting-item-description.bfm-autotag-info-managed {
+    max-height: 0;
+    margin-top: 0;
+    opacity: 0;
+    transform: translateY(-3px);
+}
+
+/* Unified panel surfaces */
+.bfm-autotag-settings-section {
+    background: var(--background-secondary) !important;
+    border-left: 4px solid var(--background-modifier-border-hover);
+    transition: background-color 220ms ease, border-color 220ms ease, box-shadow 220ms ease;
+}
+
+.bfm-autotag-settings-section:has(> h3:first-child:hover) {
+    border-left-color: var(--interactive-accent);
+    background: var(--background-secondary-alt, var(--background-secondary)) !important;
+}
+
+.bfm-autotag-how-panel {
+    background: rgba(240, 140, 0, 0.08) !important;
+    border-color: rgba(240, 140, 0, 0.28);
+    border-left-color: var(--text-warning, #f08c00);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+    transition: background-color 220ms ease, border-color 220ms ease, box-shadow 220ms ease;
+}
+
+.bfm-autotag-how-panel:hover {
+    border-color: rgba(240, 140, 0, 0.42);
+    border-left-color: var(--text-warning, #f08c00);
+    background: rgba(240, 140, 0, 0.12) !important;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 2px 8px rgba(0, 0, 0, 0.12);
+}
+
+.bfm-autotag-how-panel-warning {
+    border-left-color: var(--text-warning, #f08c00);
+}
+
+.bfm-autotag-soft-warning-panel {
+    display: flow-root;
+    margin: 0 0 12px;
+    padding: 10px 12px;
+    border: 1px solid color-mix(in srgb, var(--text-error) 26%, var(--background-modifier-border));
+    border-left: 4px solid var(--text-error);
+    border-radius: 7px;
+    background: color-mix(in srgb, var(--text-error) 8%, var(--background-secondary));
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+    transition: background-color 220ms ease, border-color 220ms ease, box-shadow 220ms ease;
+}
+
+.bfm-autotag-soft-warning-panel:hover {
+    border-color: color-mix(in srgb, var(--text-error) 40%, var(--background-modifier-border));
+    background: color-mix(in srgb, var(--text-error) 12%, var(--background-secondary)) !important;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 2px 8px rgba(0, 0, 0, 0.12);
+}
+
+.bfm-autotag-soft-warning-panel p {
+    margin: 6px 0 0;
+}
+
+.bfm-autotag-attention-warning-panel {
+    display: flow-root;
+    margin: 0 0 12px;
+    padding: 10px 12px;
+    border: 1px solid color-mix(in srgb, var(--text-warning, #f08c00) 34%, var(--background-modifier-border));
+    border-left: 4px solid var(--text-warning, #f08c00);
+    border-radius: 7px;
+    background: color-mix(in srgb, var(--text-warning, #f08c00) 9%, var(--background-secondary));
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+    transition: background-color 260ms ease, border-color 260ms ease, box-shadow 260ms ease;
+}
+
+.bfm-autotag-attention-warning-panel:hover {
+    border-color: color-mix(in srgb, var(--text-warning, #f08c00) 50%, var(--background-modifier-border));
+    background: color-mix(in srgb, var(--text-warning, #f08c00) 13%, var(--background-secondary)) !important;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 2px 8px rgba(0, 0, 0, 0.12);
+}
+
+.bfm-autotag-attention-warning-panel ul {
+    margin: 7px 0 0;
+    padding-left: 18px;
+    color: var(--text-muted);
+}
+
+.bfm-autotag-attention-warning-panel li {
+    margin: 3px 0;
+    overflow-wrap: anywhere;
+}
+
+.bfm-autotag-health-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 8px;
+    margin: 8px 0 12px;
+}
+
+.bfm-autotag-health-dashboard-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.bfm-autotag-health-card {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    min-width: 0;
+    padding: 9px 11px;
+    border: 1px solid var(--background-modifier-border);
+    border-left: 4px solid var(--background-modifier-border-hover);
+    border-radius: 7px;
+    background: color-mix(in srgb, var(--interactive-normal) 28%, transparent);
+    transition: height 280ms cubic-bezier(0.22, 1, 0.36, 1), background-color 220ms ease, border-color 220ms ease, box-shadow 220ms ease, transform 220ms ease;
+}
+
+.bfm-autotag-health-card.is-clickable {
+    cursor: pointer;
+}
+
+.bfm-autotag-health-card:hover,
+.bfm-autotag-health-card:focus,
+.bfm-autotag-health-card:focus-visible {
+    border-color: var(--background-modifier-border-hover);
+    background: color-mix(in srgb, var(--background-modifier-hover) 55%, var(--interactive-normal) 45%);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+    transform: translateY(-1px);
+    outline: none;
+}
+
+.bfm-autotag-health-card.is-success {
+    border-left-color: var(--text-success, #3ba55d);
+}
+
+.bfm-autotag-health-card.is-warning {
+    border-left-color: var(--text-warning, #f08c00);
+}
+
+.bfm-autotag-health-card.is-danger {
+    border-left-color: var(--text-error);
+}
+
+.bfm-autotag-health-card.is-accent {
+    border-left-color: var(--interactive-accent);
+}
+
+.bfm-autotag-health-card-label {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    width: 100%;
+    color: var(--text-muted);
+    font-size: 12px;
+    font-weight: 650;
+    line-height: 1.25;
+    text-transform: none;
+}
+
+.bfm-autotag-health-card-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    margin-top: 1px;
+}
+
+.bfm-autotag-health-card-icon svg {
+    width: 14px;
+    height: 14px;
+    stroke-width: 2.1;
+}
+
+.bfm-autotag-health-card-label-text {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: 1px;
+}
+
+.bfm-autotag-health-card-label-main,
+.bfm-autotag-health-card-label-sub {
+    overflow-wrap: anywhere;
+}
+
+.bfm-autotag-health-card-label-main {
+    color: var(--text-normal);
+}
+
+.bfm-autotag-health-card-label-sub {
+    color: var(--text-muted);
+    font-size: 11px;
+    font-weight: 600;
+}
+
+.bfm-autotag-health-info-wrap {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    text-transform: none;
+}
+
+.bfm-autotag-health-info-wrap .bfm-autotag-info-trigger {
+    width: 13px;
+    height: 13px;
+    margin-left: 0;
+    font-size: 9px;
+}
+
+.bfm-autotag-health-info {
+    position: absolute;
+    z-index: 20;
+    top: calc(100% + 6px);
+    left: 50%;
+    width: max-content;
+    max-width: 260px;
+    padding: 6px 8px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 6px;
+    background: var(--background-secondary-alt, var(--background-secondary));
+    color: var(--text-muted);
+    font-size: 12px;
+    font-weight: 400;
+    line-height: 1.35;
+    text-transform: none;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.22);
+    opacity: 0;
+    pointer-events: none;
+    transform: translate(-50%, -3px);
+    transition: opacity 180ms ease, transform 180ms ease;
+}
+
+.bfm-autotag-health-info-wrap:hover .bfm-autotag-health-info,
+.bfm-autotag-health-info-wrap:focus-within .bfm-autotag-health-info {
+    opacity: 1;
+    transform: translate(-50%, 0);
+}
+
+.bfm-autotag-health-card-value {
+    display: flex;
+    align-items: baseline;
+    width: 100%;
+    margin-top: 7px;
+    color: var(--text-normal);
+    font-size: 20px;
+    font-weight: 700;
+    line-height: 1.1;
+}
+
+.bfm-autotag-loading-dots {
+    display: inline-flex;
+    width: 0.9em;
+    margin-left: 3px;
+}
+
+.bfm-autotag-loading-dots span {
+    opacity: 0.25;
+    animation: bfm-autotag-loading-dot 900ms ease-in-out infinite;
+}
+
+.bfm-autotag-loading-dots span:nth-child(2) {
+    animation-delay: 150ms;
+}
+
+.bfm-autotag-loading-dots span:nth-child(3) {
+    animation-delay: 300ms;
+}
+
+.bfm-autotag-health-card-description {
+    margin-top: 5px;
+    color: var(--text-muted);
+    font-size: 12px;
+    line-height: 1.35;
+    max-height: 4.1em;
+    overflow: hidden;
+    overflow-wrap: anywhere;
+    transition: max-height 320ms cubic-bezier(0.22, 1, 0.36, 1), color 180ms ease;
+}
+
+.bfm-autotag-health-card-description.is-empty {
+    display: none;
+}
+
+.bfm-autotag-health-card:hover .bfm-autotag-health-card-description,
+.bfm-autotag-health-card:focus .bfm-autotag-health-card-description,
+.bfm-autotag-health-card:focus-visible .bfm-autotag-health-card-description {
+    max-height: 18em;
+}
+
+.bfm-autotag-health-checks {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    max-height: 4.9em;
+    margin-top: 7px;
+    overflow: hidden;
+    transition: max-height 320ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.bfm-autotag-health-checks.is-empty {
+    display: none;
+}
+
+.bfm-autotag-health-card:hover .bfm-autotag-health-checks,
+.bfm-autotag-health-card:focus .bfm-autotag-health-checks,
+.bfm-autotag-health-card:focus-visible .bfm-autotag-health-checks {
+    max-height: 18em;
+}
+
+.bfm-autotag-health-check-row {
+    display: grid;
+    grid-template-columns: 14px minmax(0, 1fr);
+    gap: 5px;
+    align-items: start;
+    color: var(--text-muted);
+    font-size: 11px;
+    line-height: 1.25;
+}
+
+.bfm-autotag-health-check-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 14px;
+    height: 14px;
+}
+
+.bfm-autotag-health-check-icon svg {
+    width: 13px;
+    height: 13px;
+    stroke-width: 2.25;
+}
+
+.bfm-autotag-health-check-row.is-success .bfm-autotag-health-check-icon {
+    color: var(--text-success, #3ba55d);
+}
+
+.bfm-autotag-health-check-row.is-warning .bfm-autotag-health-check-icon {
+    color: var(--text-warning, #f08c00);
+}
+
+.bfm-autotag-health-check-row.is-danger .bfm-autotag-health-check-icon {
+    color: var(--text-error);
+}
+
+.bfm-autotag-health-check-row.is-accent .bfm-autotag-health-check-icon {
+    color: var(--interactive-accent);
+}
+
+.bfm-autotag-health-check-row.is-spinner .bfm-autotag-health-check-icon {
+    color: var(--interactive-accent);
+}
+
+.bfm-autotag-health-check-row.is-spinner .bfm-autotag-health-check-icon svg {
+    animation: bfm-autotag-spin 900ms linear infinite;
+}
+
+.bfm-autotag-health-check-text {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+.bfm-autotag-active-image-strip-panel {
+    margin: 12px 0 14px;
+    padding: 10px 11px 11px;
+    border: 1px solid var(--background-modifier-border);
+    border-left: 4px solid var(--interactive-accent);
+    border-radius: 7px;
+    background: color-mix(in srgb, var(--interactive-normal) 24%, transparent);
+    transition: background-color 220ms ease, border-color 220ms ease, box-shadow 220ms ease;
+}
+
+.bfm-autotag-active-image-strip-panel:hover {
+    border-color: var(--background-modifier-border-hover);
+    background: color-mix(in srgb, var(--background-modifier-hover) 55%, var(--interactive-normal) 45%);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+}
+
+.bfm-autotag-active-image-strip-panel.is-idle {
+    border-left-color: var(--background-modifier-border-hover);
+}
+
+.bfm-autotag-active-image-strip-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 9px;
+}
+
+.bfm-autotag-active-image-strip-title {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    color: var(--text-normal);
+    font-size: 13px;
+    font-weight: 700;
+}
+
+.bfm-autotag-active-image-strip-icon {
+    display: inline-flex;
+    color: var(--text-muted);
+}
+
+.bfm-autotag-active-image-strip-icon svg {
+    width: 15px;
+    height: 15px;
+    stroke-width: 2.1;
+}
+
+.bfm-autotag-active-image-strip-queued {
+    flex: 0 0 auto;
+    padding: 2px 8px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 999px;
+    color: var(--text-muted);
+    background: var(--background-primary);
+    font-size: 11px;
+    font-weight: 650;
+}
+
+.bfm-autotag-active-image-strip-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+    min-height: 58px;
+}
+
+.bfm-autotag-active-image-strip-empty {
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.bfm-autotag-active-image-thumb {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 58px;
+    height: 58px;
+    flex: 0 0 auto;
+    border-radius: 50%;
+}
+
+.bfm-autotag-active-image-thumb::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border: 3px solid var(--interactive-accent);
+    border-right-color: transparent;
+    border-radius: 50%;
+    animation: bfm-autotag-spin 900ms linear infinite;
+}
+
+.bfm-autotag-active-image-thumb img,
+.bfm-autotag-active-image-thumb-fallback {
+    position: relative;
+    z-index: 1;
+    width: 46px;
+    height: 46px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 50%;
+    background: var(--background-primary);
+    object-fit: cover;
+}
+
+.bfm-autotag-active-image-thumb-fallback {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-muted);
+}
+
+.bfm-autotag-active-image-thumb-fallback svg {
+    width: 22px;
+    height: 22px;
+}
+
+.bfm-autotag-health-with-live {
+    display: grid;
+    grid-template-columns: minmax(180px, 1fr) minmax(220px, 1fr);
+    gap: 8px;
+    align-items: stretch;
+    margin: 8px 0 12px;
+}
+
+.bfm-autotag-health-with-live > .bfm-autotag-health-grid {
+    margin: 0;
+}
+
+.bfm-autotag-processing-live-status {
+    min-width: 0;
+    padding: 9px 11px;
+    border: 1px solid var(--background-modifier-border);
+    border-left: 4px solid var(--interactive-accent);
+    border-radius: 7px;
+    background: color-mix(in srgb, var(--interactive-normal) 28%, transparent);
+    transition: background-color 220ms ease, border-color 220ms ease, box-shadow 220ms ease, transform 220ms ease;
+}
+
+.bfm-autotag-processing-live-status:hover {
+    border-color: var(--background-modifier-border-hover);
+    background: color-mix(in srgb, var(--background-modifier-hover) 55%, var(--interactive-normal) 45%);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+    transform: translateY(-1px);
+}
+
+.bfm-autotag-processing-live-status .bfm-autotag-progress-spinner,
+.bfm-autotag-processing-live-status.is-complete .bfm-autotag-progress-spinner {
+    border-color: var(--interactive-accent);
+    border-right-color: transparent;
+}
+
+.bfm-autotag-processing-live-status.is-complete {
+    border-left-color: var(--text-success, #3ba55d);
+}
+
+@keyframes bfm-autotag-progress-sweep {
+    0% { transform: translateX(-125%); }
+    55% { transform: translateX(45%); }
+    100% { transform: translateX(240%); }
+}
+
+@keyframes bfm-autotag-loading-dot {
+    0%, 20% { opacity: 0.25; transform: translateY(0); }
+    45% { opacity: 1; transform: translateY(-1px); }
+    75%, 100% { opacity: 0.25; transform: translateY(0); }
+}
+
+@media (max-width: 640px) {
+    .bfm-autotag-health-dashboard-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .bfm-autotag-health-with-live {
+        grid-template-columns: 1fr;
+    }
+}
+
+@media (min-width: 641px) and (max-width: 920px) {
+    .bfm-autotag-health-dashboard-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+/* Prevent info hover self-trigger loops */
+.bfm-autotag-settings-tab .setting-item .setting-item-description {
+    pointer-events: none;
+}
+
+.bfm-autotag-info-trigger,
+.bfm-autotag-settings-tab .setting-item-name {
+    pointer-events: auto;
+}
+/* Indented settings subcategory panels */
+.bfm-autotag-subcategory-panel {
+    margin: 10px 0 12px 10px;
+    padding: 8px 10px 10px;
+    border: 1px solid var(--background-modifier-border);
+    border-left: 3px solid var(--background-modifier-border-hover);
+    border-radius: 7px;
+    background: var(--background-primary-alt, var(--background-primary));
+    transition: background-color 220ms ease, border-color 220ms ease, box-shadow 220ms ease;
+}
+
+.bfm-autotag-subcategory-panel:has(> h4:first-child:hover) {
+    border-left-color: var(--interactive-accent);
+    background: var(--background-secondary-alt, var(--background-secondary));
+}
+
+.bfm-autotag-subcategory-panel > h4:first-child {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 0 0 6px;
+    padding-bottom: 5px;
+    border-bottom: 1px solid var(--background-modifier-border);
+    color: var(--text-normal);
+    font-size: 13px;
+    font-weight: 650;
+}
+
+.bfm-autotag-subcategory-panel > .setting-item:last-child,
+.bfm-autotag-subcategory-panel > p:last-child {
+    margin-bottom: 0;
+}
+
+.bfm-autotag-property-panel {
+    margin: 8px 0 10px;
+    padding: 8px 10px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 7px;
+    background: var(--background-primary, var(--background-secondary));
+    transition: background-color 220ms ease, border-color 220ms ease, box-shadow 220ms ease;
+}
+
+.bfm-autotag-property-panel:hover {
+    border-color: var(--background-modifier-border-hover);
+    background: var(--background-primary-alt, var(--background-primary));
+}
+
+.bfm-autotag-property-panel > h5:first-child {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin: 0 0 6px;
+    padding-bottom: 5px;
+    border-bottom: 1px solid var(--background-modifier-border);
+    color: var(--text-muted);
+    font-size: 12px;
+    font-weight: 650;
+}
+
+.bfm-autotag-property-panel > .setting-item:last-child,
+.bfm-autotag-property-panel > p:last-child {
+    margin-bottom: 0;
+}
+
+.bfm-autotag-vault-candidate-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 8px 0 2px;
+}
+
+.bfm-autotag-vault-candidate-chip {
+    display: inline-flex;
+    align-items: center;
+    min-height: 22px;
+    padding: 2px 8px;
+    border: 1px solid color-mix(in srgb, var(--interactive-accent) 38%, var(--background-modifier-border));
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--interactive-accent) 12%, transparent);
+    color: var(--text-normal);
+    font-size: 12px;
+    line-height: 1.2;
+}
+
+.bfm-autotag-vault-candidate-chip-setting {
+    border-color: color-mix(in srgb, var(--text-muted) 44%, var(--background-modifier-border));
+    background: color-mix(in srgb, var(--text-muted) 12%, transparent);
+    color: var(--text-muted);
+}
+
+.bfm-autotag-newly-added-panel {
+    position: relative;
+    isolation: isolate;
+}
+
+.bfm-autotag-newly-added-panel::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+    border-radius: inherit;
+    background: color-mix(in srgb, var(--text-muted) 12%, transparent);
+    box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text-muted) 16%, transparent);
+    opacity: 0;
+    animation: bfm-autotag-new-panel-highlight 2500ms ease-in-out both;
+}
+
+.bfm-autotag-newly-added-panel > * {
+    position: relative;
+    z-index: 1;
+}
+
+@keyframes bfm-autotag-new-panel-highlight {
+    0% { opacity: 0; }
+    20% { opacity: 1; }
+    80% { opacity: 1; }
+    100% { opacity: 0; }
+}
+.bfm-autotag-format-preview {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: fit-content;
+    max-width: 100%;
+    margin: 4px 0 2px;
+    padding: 4px 7px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 6px;
+    background: var(--background-secondary);
+}
+
+.bfm-autotag-format-preview-label,
+.bfm-autotag-format-preview-hint {
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.bfm-autotag-format-preview-markdown,
+.bfm-autotag-format-preview-markdown p {
+    margin: 0;
+}
+
+.bfm-autotag-format-preview-markdown .internal-link {
+    font-weight: 500;
+}
+
+.bfm-autotag-format-preview-info-wrap {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+}
+
+.bfm-autotag-format-preview-info-wrap .bfm-autotag-info-trigger {
+    margin-left: 0;
+}
+
+.bfm-autotag-format-preview-info {
+    position: absolute;
+    z-index: 20;
+    top: calc(100% + 6px);
+    left: 50%;
+    width: max-content;
+    max-width: 260px;
+    padding: 6px 8px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 6px;
+    background: var(--background-secondary-alt, var(--background-secondary));
+    color: var(--text-muted);
+    font-size: 12px;
+    line-height: 1.35;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.22);
+    opacity: 0;
+    pointer-events: none;
+    transform: translate(-50%, -3px);
+    transition: opacity 180ms ease, transform 180ms ease;
+}
+
+.bfm-autotag-format-preview-info-wrap:hover .bfm-autotag-format-preview-info,
+.bfm-autotag-format-preview-info-wrap:focus-within .bfm-autotag-format-preview-info {
+    opacity: 1;
+    transform: translate(-50%, 0);
+}
+
+.bfm-autotag-markdown-note-preview-panel {
+    margin-top: 10px;
+}
+
+.bfm-autotag-template-suggestion-host {
+    margin-top: 8px;
+}
+
+.bfm-autotag-frontmatter-check-panel {
+    margin: 10px 0;
+    padding: 9px 11px;
+    border: 1px solid color-mix(in srgb, var(--text-success, #3ba55d) 28%, var(--background-modifier-border));
+    border-left: 4px solid var(--text-success, #3ba55d);
+    border-radius: 7px;
+    background: color-mix(in srgb, var(--text-success, #3ba55d) 8%, var(--background-secondary));
+    overflow: hidden;
+    transition: background-color 520ms ease, border-color 520ms ease, border-left-color 520ms ease, box-shadow 520ms ease;
+}
+
+.bfm-autotag-frontmatter-check-panel.has-unfilled {
+    border-color: rgba(240, 140, 0, 0.34);
+    border-left-color: var(--text-warning, #f08c00);
+    background: rgba(240, 140, 0, 0.09);
+}
+
+.bfm-autotag-frontmatter-check-info-setting {
+    margin: 0 !important;
+    padding: 0 !important;
+    border: 0 !important;
+    background: transparent !important;
+    box-shadow: none !important;
+}
+
+.bfm-autotag-frontmatter-check-info-setting:hover {
+    background: transparent !important;
+    box-shadow: none !important;
+}
+
+.bfm-autotag-frontmatter-check-info-setting .setting-item-info {
+    margin-right: 0;
+}
+
+.bfm-autotag-frontmatter-check-info-setting .setting-item-name {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+}
+
+.bfm-autotag-frontmatter-check-panel strong {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+}
+
+.bfm-autotag-frontmatter-check-info {
+    vertical-align: middle;
+}
+
+.bfm-autotag-frontmatter-check-list {
+    margin: 8px 0 0;
+    padding-left: 20px;
+    overflow: hidden;
+}
+
+.bfm-autotag-frontmatter-check-list li {
+    margin: 3px 0;
+    overflow-wrap: anywhere;
+}
+
+.bfm-autotag-markdown-note-preview {
+    max-height: 360px;
+    overflow: auto;
+    margin: 8px 0 0;
+    padding: 10px 12px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 7px;
+    background: var(--background-primary-alt, var(--background-primary));
+    color: var(--text-normal);
+    font-size: 12px;
+    line-height: 1.45;
+    white-space: pre-wrap;
+}
+
+.bfm-autotag-markdown-note-preview code {
+    white-space: pre-wrap;
+}
+.bfm-autotag-retry-notice {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.bfm-autotag-retry-spinner {
+    width: 18px;
+    height: 18px;
+    flex: 0 0 auto;
+    border: 2px solid var(--text-muted);
+    border-right-color: transparent;
+    border-radius: 50%;
+    animation: bfm-autotag-spin 900ms linear infinite;
+}
+
+.bfm-autotag-retry-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.bfm-autotag-retry-title {
+    color: var(--text-normal);
+    font-size: 13px;
+    line-height: 1.25;
+}
+
+.bfm-autotag-retry-subtitle {
+    color: var(--text-muted);
+    font-size: 11px;
+    line-height: 1.2;
+}
+
+.bfm-autotag-progress-notice {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 260px;
+}
+
+.bfm-autotag-progress-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.bfm-autotag-progress-spinner {
+    width: 18px;
+    height: 18px;
+    flex: 0 0 auto;
+    border: 2px solid var(--text-muted);
+    border-right-color: transparent;
+    border-radius: 50%;
+    animation: bfm-autotag-spin 900ms linear infinite;
+}
+
+.bfm-autotag-progress-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.bfm-autotag-progress-title {
+    color: var(--text-normal);
+    font-size: 13px;
+    line-height: 1.25;
+}
+
+.bfm-autotag-progress-subtitle {
+    color: var(--text-muted);
+    font-size: 11px;
+    line-height: 1.2;
+}
+
+.bfm-autotag-progress-bar {
+    height: 5px;
+    overflow: hidden;
+    border-radius: 999px;
+    background: var(--background-modifier-border);
+}
+
+.bfm-autotag-progress-fill {
+    width: 0%;
+    height: 100%;
+    border-radius: inherit;
+    background: var(--interactive-accent);
+    transition: width 220ms ease, background-color 220ms ease;
+}
+
+.bfm-autotag-progress-notice.is-complete .bfm-autotag-progress-spinner {
+    animation: none;
+    border-color: var(--text-success);
+}
+
+.bfm-autotag-progress-notice.is-complete .bfm-autotag-progress-fill {
+    background: var(--text-success);
+}
+
+.bfm-autotag-settings-tab .setting-item {
+    margin: 6px 0;
+    padding: 8px 10px;
+    border: 1px solid var(--background-modifier-border);
+    border-left: 3px solid var(--background-modifier-border-hover);
+    border-radius: 7px;
+    background: color-mix(in srgb, var(--interactive-normal) 28%, transparent);
+}
+
+.bfm-autotag-settings-tab .setting-item:not(:has(.checkbox-container)) {
+    border-left-color: var(--background-modifier-border-hover);
+}
+
+.bfm-autotag-settings-tab .setting-item:has(.checkbox-container) {
+    border-left-color: var(--text-error) !important;
+    background: color-mix(in srgb, var(--background-modifier-error) 5%, var(--interactive-normal) 24%);
+}
+
+.bfm-autotag-settings-tab .setting-item:has(.checkbox-container.is-enabled) {
+    border-left-color: var(--text-success, #3ba55d) !important;
+    background: color-mix(in srgb, var(--text-success, #3ba55d) 5%, var(--interactive-normal) 24%);
+}
+
+.bfm-autotag-settings-tab .setting-item:hover {
+    background: color-mix(in srgb, var(--background-modifier-hover) 65%, var(--interactive-normal) 35%);
+    border-color: var(--background-modifier-border-hover);
+}
+
+.bfm-autotag-settings-tab .setting-item:has(.checkbox-container):hover {
+    background: color-mix(in srgb, var(--background-modifier-error) 8%, var(--background-modifier-hover) 60%);
+}
+
+.bfm-autotag-settings-tab .setting-item:has(.checkbox-container.is-enabled):hover {
+    background: color-mix(in srgb, var(--text-success, #3ba55d) 8%, var(--background-modifier-hover) 60%);
+}
+
+@keyframes bfm-autotag-spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}

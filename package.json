@@ -1,16 +1,29 @@
 {
-	"name": "obsidian-sample-plugin",
-	"version": "1.0.0",
-	"description": "This is a sample plugin for Obsidian (https://obsidian.md)",
+	"name": "marus-autotag",
+	"version": "0.1.0",
+	"description": "Autotag companion notes created by Binary File Manager using folder tags, AI tags, geolocation, duplicate protection, and recovery tools.",
 	"main": "main.js",
 	"scripts": {
 		"dev": "node esbuild.config.mjs",
 		"build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
 		"version": "node version-bump.mjs && git add manifest.json versions.json"
 	},
-	"keywords": [],
-	"author": "",
-	"license": "MIT",
+	"keywords": [
+		"obsidian",
+		"obsidian-plugin",
+		"autotag",
+		"binary-file-manager"
+	],
+	"author": "maruXmaruTV",
+	"license": "GPL-3.0-or-later",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/maruXmaruTV/marus-autotag.git"
+	},
+	"bugs": {
+		"url": "https://github.com/maruXmaruTV/marus-autotag/issues"
+	},
+	"homepage": "https://github.com/maruXmaruTV/marus-autotag#readme",
 	"devDependencies": {
 		"@types/node": "^16.11.6",
 		"@typescript-eslint/eslint-plugin": "5.29.0",
