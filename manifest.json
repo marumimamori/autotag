@@ -1,10 +1,10 @@
 {
-	"id": "marus-autotag",
-	"name": "Maru's Autotag",
-	"version": "0.1.0",
+	"id": "autotag",
+	"name": "Autotag",
+	"version": "0.1.1",
 	"minAppVersion": "0.15.0",
-	"description": "Autotag companion notes created by Binary File Manager using folder tags, AI tags, geolocation, duplicate protection, and recovery tools.",
-	"author": "maruXmaruTV",
-	"authorUrl": "https://maruxmaru.tv",
+	"description": "Create and enrich companion notes for files using folder tags, AI tags, geolocation, duplicate protection, and recovery tools.",
+	"author": "marumimamori",
+	"authorUrl": "https://marumimamori.me",
 	"isDesktopOnly": false
 }

@@ -1,7 +1,7 @@
 {
-	"name": "marus-autotag",
-	"version": "0.1.0",
-	"description": "Autotag companion notes created by Binary File Manager using folder tags, AI tags, geolocation, duplicate protection, and recovery tools.",
+	"name": "autotag",
+	"version": "0.1.1",
+	"description": "Create and enrich companion notes for files using folder tags, AI tags, geolocation, duplicate protection, and recovery tools.",
 	"main": "main.js",
 	"scripts": {
 		"dev": "node esbuild.config.mjs",
@@ -12,18 +12,18 @@
 		"obsidian",
 		"obsidian-plugin",
 		"autotag",
-		"binary-file-manager"
+		"companion-notes"
 	],
-	"author": "maruXmaruTV",
+	"author": "marumimamori",
 	"license": "GPL-3.0-or-later",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/maruXmaruTV/marus-autotag.git"
+		"url": "git+https://github.com/marumimamori/autotag.git"
 	},
 	"bugs": {
-		"url": "https://github.com/maruXmaruTV/marus-autotag/issues"
+		"url": "https://github.com/marumimamori/autotag/issues"
 	},
-	"homepage": "https://github.com/maruXmaruTV/marus-autotag#readme",
+	"homepage": "https://github.com/marumimamori/autotag#readme",
 	"devDependencies": {
 		"@types/node": "^16.11.6",
 		"@typescript-eslint/eslint-plugin": "5.29.0",

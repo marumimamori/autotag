@@ -1,9 +1,4 @@
 import { App, Editor, FileSystemAdapter, MarkdownFileInfo, MarkdownRenderer, Menu, Modal, Notice, Plugin, PluginSettingTab, requestUrl, setIcon, Setting, TFile, TFolder } from 'obsidian';
-type AIImageAnalyzerAPI = {
-	analyzeImage: (file: TFile) => Promise<string>;
-	canBeAnalyzed: (file: TFile) => boolean;
-	isInCache: (file: TFile) => Promise<boolean>;
-};
 
 type FailedProcessingFile = {
     path: string;
@@ -12,7 +7,7 @@ type FailedProcessingFile = {
     lastFailedAt: number;
 };
 
-type ShutdownProtectionStage = "queued" | "fingerprinted" | "duplicate-decision" | "waiting-duplicate-choice" | "waiting-bfm-note" | "processing" | "writing";
+type ShutdownProtectionStage = "queued" | "fingerprinted" | "companion-note" | "duplicate-decision" | "waiting-duplicate-choice" | "processing" | "writing";
 type ProtectedJobSource = "shutdown" | "manual-vault-reprocess";
 
 type ProtectedProcessingJob = {
@@ -68,7 +63,7 @@ type PendingManualPairAction = {
     notePath: string;
 };
 
-type BfmAutotagFileContext = {
+type AutotagFileContext = {
     selectedFile: TFile;
     isWatchedSource: boolean;
     isCompanionNote: boolean;
@@ -79,11 +74,15 @@ type BfmAutotagFileContext = {
     companionPath?: string;
 };
 
+type FolderPropertyValueSource = "manual" | "automatic";
+
 type FolderPropertyMapping = {
     id: string;
     property: string;
     values: string[];
+    valueSource: FolderPropertyValueSource;
     format: string;
+    aiCandidateMode: CandidateMode;
     useAsAiCandidate: boolean;
     useAsVaultCandidate: boolean;
 };
@@ -119,6 +118,7 @@ type GeocodeCacheEntry = {
 type GeneratedAiTagResult = {
     aiTags: string[];
     vaultAwarenessTags: string[];
+    hadAiTagResponse?: boolean;
 };
 
 type GeneratedMarkdownPreviewRefs = {
@@ -126,6 +126,7 @@ type GeneratedMarkdownPreviewRefs = {
     titleTextEl: HTMLElement;
     listEl: HTMLElement;
     cleanTextEl: HTMLElement;
+    embedSettingHostEl: HTMLElement;
     previewPanelEl: HTMLElement;
     codeEl: HTMLElement;
 };
@@ -135,6 +136,7 @@ type TemplatePropertySuggestionRefs = {
     titleTextEl: HTMLElement;
     listEl: HTMLElement;
     cleanTextEl: HTMLElement;
+    copyButtonEl: HTMLButtonElement;
 };
 
 type ProgressNoticeController = {
@@ -174,8 +176,18 @@ type HealthDashboardCard = {
 type HealthDashboardCardRefs = {
     cardEl: HTMLElement;
     valueEl: HTMLElement;
+    detailsEl: HTMLElement;
     descriptionEl: HTMLElement;
     checksEl: HTMLElement;
+    signature: string;
+};
+
+type ExpensiveHealthCounts = {
+    updatedAt: number;
+    duplicateUnlinkedHashCount: number;
+    duplicateUnhashedFileCount: number;
+    duplicateUnpairedFileCount: number;
+    recoverUnprocessedBaseFileCount: number;
 };
 
 type GpsCoordinates = {
@@ -248,14 +260,15 @@ type CandidateMode = "disabled" | "consider" | "all" | "exclude";
 
 type LinguisticFeatureMode = "exclude" | "base" | "use";
 
-type TemplateSource = "internal" | "bfm-templater";
+type TemplateSource = "internal" | "template-file";
+type CompanionNameCaseMode = "current" | "legacy-title-lower";
 type SettingsProfileFile = {
     name?: string;
     custom?: boolean;
     sourceName?: string;
     createdAt?: number;
     updatedAt?: number;
-    settings?: Partial<BfmAutotagSettings>;
+    settings?: Partial<AutotagSettings>;
 };
 
 type SettingsProfileSummary = {
@@ -265,13 +278,22 @@ type SettingsProfileSummary = {
     sourceName?: string;
     builtIn: boolean;
     path?: string;
-    settings: Partial<BfmAutotagSettings>;
+    settings: Partial<AutotagSettings>;
 };
 
 const BUILTIN_DEFAULT_SETTINGS_PROFILE_ID = "builtin:default";
 const BUILTIN_DEV_SETTINGS_PROFILE_ID = "builtin:dev";
+const BUILTIN_FEATURE_TEST_SETTINGS_PROFILE_ID = "builtin:feature-test";
 const SETTINGS_PROFILE_FOLDER_NAME = "settings-profiles";
 const SETTINGS_PROFILE_CUSTOM_SUFFIX = " [Custom]";
+
+const DEFAULT_OLLAMA_VISION_PROMPT = [
+    "Describe this image for an Obsidian companion note.",
+    "Be concrete and concise.",
+    "Mention visible subjects, setting, style, objects, colors, composition, and readable text when present.",
+    "Do not guess people, places, countries, dates, brands, or events unless they are visible or provided as metadata.",
+    "Return only the description text.",
+].join(" ");
 
 type LinguisticFeatureSettings = {
     synonyms: LinguisticFeatureMode;
@@ -322,12 +344,23 @@ type VaultVocabularyEntry = {
     aliases: Set<string>;
 };
 
-interface BfmAutotagSettings {
+type LearnedVaultRelation = {
+    evidence: string;
+    candidate: string;
+    relationType: string;
+    model: string;
+    confirmations: number;
+    createdAt: number;
+    lastConfirmedAt: number;
+    lastUsedAt: number;
+};
+
+interface AutotagSettings {
     settingsProfileId: string; // Active import/export setup profile
     basePath: string;             // Folder where watched files are placed
-    bfmNewFileLocation: string;   // Folder where BFM notes are created
-    bfmFileNameFormat: string;    // BFM metadata filename format
-    clearDropdownExcludedProperties: string[]; // Extra frontmatter properties hidden from property dropdowns
+    moveOutsideFilesToBasePath: boolean; // Move newly added supported source/media files into the managed source folder before processing
+    companionNoteFolder: string;   // Folder where companion notes are created
+    companionNoteNameFormat: string;    // Companion note filename format
     hideLimitedFileTypeWarnings: boolean; // Collapse limited file type warning controls
     limitedFileTypeWarningSkips: Record<string, boolean>; // Per-extension compatibility popup suppression
     linkToFilePropertyEnabled: boolean; // Write link-to-file property
@@ -339,28 +372,34 @@ interface BfmAutotagSettings {
     aiTagsPropertyEnabled: boolean; // Write AI-generated tags property
     aiTagsPropertyName: string; // Property name for AI-generated tags
     aiTagsFormat: string; // Formatting template for AI-generated tags
+    removeFolderTagsFromAiTags: boolean; // Remove folder-tag values before writing AI tags
+    removeGeolocationFromAiTags: boolean; // Remove known geolocation terms before writing AI tags
     aiTagsUseAsVaultCandidate: boolean; // Use AI-generated tags as vault-awareness candidates
     aiDescriptionPropertyEnabled: boolean; // Write AI-generated description property
     aiDescriptionPropertyName: string; // Property name for AI-generated description
     useGeolocationForAiDescription: boolean; // Use known geolocation metadata to improve AI descriptions
+    useGeolocationForAiTags: boolean; // Use known geolocation metadata as AI tag evidence
+    imageAnalysisEnabled: boolean; // Use local Ollama vision to create image descriptions
+    ollamaVisionModel: string; // Local Ollama vision model name
+    ollamaVisionPrompt: string; // Prompt sent to the local Ollama vision model
+    aiDescriptionMinimumWords: number; // Requested minimum word count for generated image descriptions
     processedFiles: string[];     // Store paths of already handled files
     failedFiles: FailedProcessingFile[]; // Store files that failed processing
     shutdownProtectionEnabled: boolean; // Persist unfinished queue items across reloads
     autoProcessUnprocessedOnReload: boolean; // Queue unprocessed watched files when the plugin loads
     deleteLinkedFilePair: boolean; // Delete companion/source counterpart when one side is deleted
-    createMissingCompanionNote: boolean; // Create companion note if BFM fails repeatedly
-    deleteLonelyFileWithoutCompanion: boolean; // Delete source file if no companion note exists after retries
-    lonelyDeletedImageCount: number; // Count files deleted because no companion note appeared
     protectedJobs: ProtectedProcessingJob[]; // Persisted queue/resume checkpoints
-    useDuplicateProtection: boolean; // Use duplicate fingerprinting and duplicate actions
     folderPropertyMappings: FolderPropertyMapping[]; // Folder names mapped to custom frontmatter properties
+    folderPropertyManualValueMemory: Record<string, string[]>; // Remember manual folder values by property name
     folderFallbackProperty: string; // Frontmatter property for folder names not matched by property lists
     folderFallbackFormat: string; // Formatting template for fallback folder values
+    folderFallbackAiCandidateMode: CandidateMode; // How fallback folder values contribute to AI tags
     folderFallbackUseAsAiCandidate: boolean; // Use fallback folder values as AI candidates
     folderFallbackUseAsVaultCandidate: boolean; // Use fallback folder property as a vault-awareness candidate
     useFolderTags: boolean; // Use folder names for frontmatter values
     templateSource: TemplateSource; // Where the base note template comes from
     frontmatterTemplate: string; // Template for generated companion note frontmatter
+    templateFilePath: string; // Vault-relative template file used when templateSource is template-file
     writeImageEmbedInBody: boolean; // Write image embed into note body after frontmatter
     geolocationEnabled: boolean; // Read GPS metadata and write configured geolocation properties
     geolocationProvider: GeolocationProvider; // Reverse geocoding provider
@@ -372,16 +411,20 @@ interface BfmAutotagSettings {
     geocodePublicRequestsToday: number; // Public Nominatim requests used today
     geocodeLastRequestAt: number; // Timestamp of the last reverse geocode request
     aiTaggingEnabled: boolean;    // Generate semantic AI tags from the image description
-    folderTagsCandidateMode: CandidateMode; // How folder-derived tags contribute to AI tags
-    manualEnrichmentRules: string; // Manual concept expansion rules
-    manualSubjectBridgeRules: string; // Absolute personal concept relationships
+    bridgeRules: string; // Shared manual concept expansion rules for both Bridge engines
     bridgeEnabled: boolean; // Apply manual bridge enrichment rules
+    manualEnrichmentEnabled: boolean; // Expand generated tags through direct manual enrichment rules
+    bridgeUseAiInput: boolean; // Allow Bridge rules to use AI description and accepted AI tags
+    bridgeUseFilenameInput: boolean; // Allow Bridge rules to use filename candidates
+    bridgeUseFolderInput: boolean; // Allow Bridge rules to use folder-tag candidates
+    bridgeUseGeolocationInput: boolean; // Allow Bridge rules to use known geolocation metadata
     bridgeUsePreBridgeVaultAwarenessOutput: boolean; // Include pre-bridge/related bridge terms in Vault Awareness output
     bridgeLinguisticFeatures: LinguisticFeatureSettings;
     hideBridgeLinguisticFeatures: boolean;
     vocabularyCandidateProperties?: string[]; // Deprecated; candidate properties now come from visible per-property toggles
     excludedVocabularyTerms: string[]; // Terms excluded from vault candidate vocabulary
     filenameCandidateMode: CandidateMode; // How image filenames contribute to AI tags
+    filenameCandidatesHumanReadableOnly: boolean; // Ignore camera/hash/date-style filenames before using filename candidates
     maxPromptVocabularyTerms: number; // Max vault vocabulary candidates sent to Ollama
     vaultAwarenessEnabled: boolean; // Add known vault vocabulary after base AI tagging
     maxVaultAwareAdditions: number; // Max known vault concepts added by vault awareness
@@ -391,6 +434,8 @@ interface BfmAutotagSettings {
     vaultAwarenessOutputExclusive: boolean; // Keep Vault Awareness additions out of AI tags when writing separately
     vaultLinguisticFeatures: LinguisticFeatureSettings;
     hideVaultLinguisticFeatures: boolean;
+    learnedVaultRelations: LearnedVaultRelation[]; // Vault-local relationships confirmed by the Vault Awareness model
+    learnedVaultRelationCacheLimit: number; // Maximum retained learned Vault Awareness relationships
     ollamaGeneratedTagsCap: number; // Max Ollama aitags written; 0 means infinite
     ollamaBaseUrl: string;        // Local Ollama server URL
     ollamaModel: string;          // Local Ollama model name
@@ -404,20 +449,40 @@ interface BfmAutotagSettings {
     duplicateRecords: DuplicateRecord[]; // Stored duplicate fingerprints
     pairRecords: PairRecord[]; // Stable image/companion ownership pairs
     parallelWorkers: number;      // Max files processed in parallel
-    bfmNoteMaxWaitMs: number;     // Max time to wait for BFM companion note
-    bfmNotePollIntervalMs: number;// Poll interval while waiting for BFM note
     queueBatchMaxWaitMs: number;  // Max debounce window when batching dropped files
+    companionNoteCreationRetries: number; // Retry count after companion note creation is not verified
+    retryInitialWaitSeconds: number; // Wait before the first retry; later retries add the same interval
     maxProcessingAttempts: number;// Max attempts before a failed file stops retrying
 }
 
-const DEFAULT_SETTINGS: BfmAutotagSettings = {
+const DEFAULT_SETTINGS: AutotagSettings = {
     settingsProfileId: BUILTIN_DEFAULT_SETTINGS_PROFILE_ID,
     basePath: 'Files/Attachments/Ata File',
-    bfmNewFileLocation: 'Files/Attachments/Ata Data',
-    bfmFileNameFormat: 'Ata_{{NAME}}_{{EXTENSION}}',
-    clearDropdownExcludedProperties: [],
+    moveOutsideFilesToBasePath: true,
+    companionNoteFolder: 'Files/Attachments/Ata Data',
+    companionNoteNameFormat: 'Ata_{{Name}}_{{extension}}',
     hideLimitedFileTypeWarnings: true,
-    limitedFileTypeWarningSkips: {},
+    limitedFileTypeWarningSkips: {
+        avif: false,
+        heic: false,
+        heif: false,
+        tif: false,
+        tiff: false,
+        jxl: false,
+        svg: false,
+        ico: false,
+        psd: false,
+        psb: false,
+        raw: false,
+        dng: false,
+        cr2: false,
+        cr3: false,
+        nef: false,
+        arw: false,
+        rw2: false,
+        orf: false,
+        raf: false,
+    },
     linkToFilePropertyEnabled: true,
     linkToFilePropertyName: 'linktofile',
     fileTypePropertyEnabled: true,
@@ -425,59 +490,58 @@ const DEFAULT_SETTINGS: BfmAutotagSettings = {
     embedPropertyEnabled: true,
     embedPropertyName: 'embed',
     aiTagsPropertyEnabled: true,
-    aiTagsPropertyName: 'aitags',
+    aiTagsPropertyName: 'aiTags',
     aiTagsFormat: '',
-    aiTagsUseAsVaultCandidate: true,
+    removeFolderTagsFromAiTags: true,
+    removeGeolocationFromAiTags: true,
+    aiTagsUseAsVaultCandidate: false,
     aiDescriptionPropertyEnabled: true,
-    aiDescriptionPropertyName: 'aidescription',
+    aiDescriptionPropertyName: 'aiDescription',
     useGeolocationForAiDescription: true,
+    useGeolocationForAiTags: true,
+    imageAnalysisEnabled: true,
+    ollamaVisionModel: 'llava-llama3',
+    ollamaVisionPrompt: DEFAULT_OLLAMA_VISION_PROMPT,
+    aiDescriptionMinimumWords: 100,
     processedFiles: [],
     failedFiles: [],
     shutdownProtectionEnabled: true,
-    autoProcessUnprocessedOnReload: false,
+    autoProcessUnprocessedOnReload: true,
     deleteLinkedFilePair: true,
-    createMissingCompanionNote: true,
-    deleteLonelyFileWithoutCompanion: false,
-    lonelyDeletedImageCount: 0,
     protectedJobs: [],
-    useDuplicateProtection: true,
     folderPropertyMappings: [
-        { id: 'domains', property: 'domains', values: [], format: '', useAsAiCandidate: true, useAsVaultCandidate: true },
-        { id: 'types', property: 'types', values: [], format: '', useAsAiCandidate: true, useAsVaultCandidate: true },
+        { id: 'domains', property: 'links', values: [], valueSource: 'automatic', format: '[[Example]]', aiCandidateMode: 'all', useAsAiCandidate: true, useAsVaultCandidate: true },
     ],
+    folderPropertyManualValueMemory: {
+        domains: [],
+        types: [],
+        tags: [],
+    },
     folderFallbackProperty: 'autotag-fallback',
     folderFallbackFormat: '',
+    folderFallbackAiCandidateMode: 'all',
     folderFallbackUseAsAiCandidate: true,
-    folderFallbackUseAsVaultCandidate: true,
-    useFolderTags: false,
+    folderFallbackUseAsVaultCandidate: false,
+    useFolderTags: true,
     templateSource: 'internal',
     frontmatterTemplate: [
-        'domains:',
-        'types:',
-        '- Ata',
-        'related:',
-        'currentStatus:',
-        'linktofile: This text will be overwritten',
-        'filetype: This text will be overwritten',
-        'embed: This text will be overwritten',
-        'lastModified:',
-        'created:',
-        'aitags:',
-        '- This text will be overwritten',
-        'aidescription: This text will be overwritten',
-        'tags:',
-        '- excalidraw',
-        'excalidraw-plugin: parsed',
-        'excalidraw-open-md: true',
+        'links:',
+        'aiDescription:',
+        'aiTags:',
+        'country:',
+        'city:',
+        'embed:',
+        'filetype:',
+        'linktofile:',
+        'autotag-fallback:',
     ].join('\n'),
+    templateFilePath: 'Tools/Templates/Tem-Autotag.md',
     writeImageEmbedInBody: true,
-    geolocationEnabled: false,
+    geolocationEnabled: true,
     geolocationProvider: 'public-nominatim',
     geolocationLocalUrl: 'http://127.0.0.1:8080',
     geolocationProperties: [
-        { id: 'latitude', field: 'latitude', property: 'latitude', format: '' },
-        { id: 'longitude', field: 'longitude', property: 'longitude', format: '' },
-        { id: 'country', field: 'country', property: 'country', format: '' },
+        { id: 'latitude', field: 'country', property: 'country', format: '' },
         { id: 'city', field: 'city', property: 'city', format: '' },
     ],
     geocodeCache: {},
@@ -485,49 +549,330 @@ const DEFAULT_SETTINGS: BfmAutotagSettings = {
     geocodePublicDay: '',
     geocodePublicRequestsToday: 0,
     geocodeLastRequestAt: 0,
-    aiTaggingEnabled: false,
-    folderTagsCandidateMode: 'all',
-    manualEnrichmentRules: '',
-    manualSubjectBridgeRules: '',
-    bridgeEnabled: false,
+    aiTaggingEnabled: true,
+    bridgeRules: 'House => Architecture',
+    bridgeEnabled: true,
+    manualEnrichmentEnabled: true,
+    bridgeUseAiInput: true,
+    bridgeUseFilenameInput: true,
+    bridgeUseFolderInput: true,
+    bridgeUseGeolocationInput: true,
     bridgeUsePreBridgeVaultAwarenessOutput: true,
-    bridgeLinguisticFeatures: { ...DEFAULT_LINGUISTIC_FEATURES },
+    bridgeLinguisticFeatures: {
+        synonyms: 'use',
+        grammaticalVariants: 'use',
+        compoundDecomposition: 'use',
+        vaultAliases: 'use',
+        acronymsAbbreviations: 'use',
+        spellingVariants: 'use',
+        broaderNarrower: 'use',
+        canonicalization: 'use',
+    },
     hideBridgeLinguisticFeatures: true,
     excludedVocabularyTerms: ['Ata'],
     filenameCandidateMode: 'all',
+    filenameCandidatesHumanReadableOnly: true,
     maxPromptVocabularyTerms: 100,
-    vaultAwarenessEnabled: false,
+    vaultAwarenessEnabled: true,
     maxVaultAwareAdditions: 20,
     vaultAwarenessOutputEnabled: false,
     vaultAwarenessOutputPropertyName: 'vaulttags',
     vaultAwarenessOutputFormat: '',
     vaultAwarenessOutputExclusive: false,
-    vaultLinguisticFeatures: { ...DEFAULT_LINGUISTIC_FEATURES },
+    vaultLinguisticFeatures: {
+        synonyms: 'use',
+        grammaticalVariants: 'use',
+        compoundDecomposition: 'use',
+        vaultAliases: 'use',
+        acronymsAbbreviations: 'use',
+        spellingVariants: 'use',
+        broaderNarrower: 'use',
+        canonicalization: 'use',
+    },
     hideVaultLinguisticFeatures: true,
+    learnedVaultRelations: [],
+    learnedVaultRelationCacheLimit: 500,
     ollamaGeneratedTagsCap: 100,
     ollamaBaseUrl: 'http://127.0.0.1:11434',
     ollamaModel: 'qwen3:8b',
-    duplicateDetectionMode: 'exact',
+    duplicateDetectionMode: 'exact-visual',
     exactDuplicateAction: 'ask',
     visualDuplicateAction: 'ask',
     visualDuplicateThreshold: 8,
-    duplicateMigrateLinksOnReplace: false,
+    duplicateMigrateLinksOnReplace: true,
     duplicateAutorenameOnReplace: true,
     waitForDuplicateSourceProcessing: true,
     duplicateRecords: [],
     pairRecords: [],
     parallelWorkers: 4,
-    bfmNoteMaxWaitMs: 5000,
-    bfmNotePollIntervalMs: 500,
     queueBatchMaxWaitMs: 15000,
+    companionNoteCreationRetries: 2,
+    retryInitialWaitSeconds: 2,
     maxProcessingAttempts: 3,
 };
 
-const SETTINGS_PROFILE_CONTROLLED_KEYS: (keyof BfmAutotagSettings)[] = [
+const BUILTIN_DEV_PROFILE_SETTINGS: Partial<AutotagSettings> = {
+    basePath: "Files/Attachments/Ata File",
+    moveOutsideFilesToBasePath: true,
+    companionNoteFolder: "Files/Attachments/Ata Data",
+    companionNoteNameFormat: "Ata_{{Name}}_{{extension}}",
+    hideLimitedFileTypeWarnings: true,
+    limitedFileTypeWarningSkips: {
+        avif: false,
+        heic: false,
+        heif: false,
+        tif: false,
+        tiff: false,
+        jxl: false,
+        svg: false,
+        ico: false,
+        psd: false,
+        psb: false,
+        raw: false,
+        dng: false,
+        cr2: false,
+        cr3: false,
+        nef: false,
+        arw: false,
+        rw2: false,
+        orf: false,
+        raf: false,
+    },
+    linkToFilePropertyEnabled: true,
+    linkToFilePropertyName: "linktofile",
+    fileTypePropertyEnabled: true,
+    fileTypePropertyName: "filetype",
+    embedPropertyEnabled: true,
+    embedPropertyName: "embed",
+    aiTagsPropertyEnabled: true,
+    aiTagsPropertyName: "aiDomains",
+    aiTagsFormat: "[[Example]]",
+    removeFolderTagsFromAiTags: true,
+    removeGeolocationFromAiTags: true,
+    aiTagsUseAsVaultCandidate: false,
+    aiDescriptionPropertyEnabled: true,
+    aiDescriptionPropertyName: "aiDescription",
+    useGeolocationForAiDescription: true,
+    useGeolocationForAiTags: true,
+    imageAnalysisEnabled: true,
+    ollamaVisionModel: "llava-llama3",
+    ollamaVisionPrompt: DEFAULT_OLLAMA_VISION_PROMPT,
+    aiDescriptionMinimumWords: 100,
+    shutdownProtectionEnabled: true,
+    autoProcessUnprocessedOnReload: true,
+    deleteLinkedFilePair: true,
+    folderPropertyMappings: [
+        {
+            id: "1789001282744-pl8zaikbl0h",
+            property: "geoCountry",
+            values: [],
+            valueSource: "automatic",
+            format: "[[Example]]",
+            aiCandidateMode: "all",
+            useAsAiCandidate: true,
+            useAsVaultCandidate: false,
+        },
+        {
+            id: "1789001908630-jb4x6f4rsnt",
+            property: "geoRegion",
+            values: [],
+            valueSource: "automatic",
+            format: "",
+            aiCandidateMode: "all",
+            useAsAiCandidate: true,
+            useAsVaultCandidate: false,
+        },
+        {
+            id: "1789001927644-ou13d4femmn",
+            property: "geoCity",
+            values: [],
+            valueSource: "automatic",
+            format: "",
+            aiCandidateMode: "all",
+            useAsAiCandidate: true,
+            useAsVaultCandidate: false,
+        },
+        {
+            id: "1789587761213-8hjvs96djg",
+            property: "domains",
+            values: [],
+            valueSource: "automatic",
+            format: "[[Example]]",
+            aiCandidateMode: "all",
+            useAsAiCandidate: true,
+            useAsVaultCandidate: true,
+        },
+        {
+            id: "1789587774316-qmo1fi68t4a",
+            property: "types",
+            values: ["Ata"],
+            valueSource: "automatic",
+            format: "",
+            aiCandidateMode: "all",
+            useAsAiCandidate: true,
+            useAsVaultCandidate: false,
+        },
+    ],
+    folderPropertyManualValueMemory: {
+        currentstatus: ["pop"],
+        tags: [],
+        domains: [],
+        "autotag-fallback": [],
+        types: [],
+        geocountry: [],
+        georegion: [],
+        geocity: [],
+    },
+    folderFallbackProperty: "domains",
+    folderFallbackFormat: "[[Example]]",
+    folderFallbackAiCandidateMode: "all",
+    folderFallbackUseAsAiCandidate: true,
+    folderFallbackUseAsVaultCandidate: true,
+    useFolderTags: true,
+    templateSource: "internal",
+    frontmatterTemplate: "domains:\ntypes:\n- Ata\nrelated:\ncurrentStatus:\nlinktofile: \nfiletype: \nembed: \nlastModified:\ncreated:\naiDomains:\naiDescription: \ngeoCountry:\ngeoRegion:\ngeoCity:\n",
+    templateFilePath: "",
+    writeImageEmbedInBody: true,
+    geolocationEnabled: true,
+    geolocationProvider: "public-nominatim",
+    geolocationLocalUrl: "http://127.0.0.1:8080",
+    geolocationProperties: [
+        {
+            id: "country",
+            field: "country",
+            property: "geoCountry",
+            format: "[[Example]]",
+        },
+        {
+            id: "1788715546405-e5u230ozo5v",
+            field: "region",
+            property: "geoRegion",
+            format: "[[Example]]",
+        },
+        {
+            id: "1788715558589-whq5cb38pp",
+            field: "city",
+            property: "geoCity",
+            format: "[[Example]]",
+        },
+    ],
+    aiTaggingEnabled: true,
+    bridgeRules: "House => Architecture",
+    bridgeEnabled: true,
+    manualEnrichmentEnabled: true,
+    bridgeUseAiInput: true,
+    bridgeUseFilenameInput: true,
+    bridgeUseFolderInput: true,
+    bridgeUseGeolocationInput: true,
+    bridgeUsePreBridgeVaultAwarenessOutput: true,
+    bridgeLinguisticFeatures: {
+        synonyms: "use",
+        grammaticalVariants: "use",
+        compoundDecomposition: "use",
+        vaultAliases: "use",
+        acronymsAbbreviations: "use",
+        spellingVariants: "use",
+        broaderNarrower: "use",
+        canonicalization: "use",
+    },
+    hideBridgeLinguisticFeatures: true,
+    excludedVocabularyTerms: ["Ata"],
+    filenameCandidateMode: "all",
+    filenameCandidatesHumanReadableOnly: true,
+    maxPromptVocabularyTerms: 100,
+    vaultAwarenessEnabled: true,
+    maxVaultAwareAdditions: 20,
+    vaultAwarenessOutputEnabled: true,
+    vaultAwarenessOutputPropertyName: "domains",
+    vaultAwarenessOutputFormat: "[[Example]]",
+    vaultAwarenessOutputExclusive: true,
+    vaultLinguisticFeatures: {
+        synonyms: "use",
+        grammaticalVariants: "use",
+        compoundDecomposition: "use",
+        vaultAliases: "use",
+        acronymsAbbreviations: "use",
+        spellingVariants: "use",
+        broaderNarrower: "use",
+        canonicalization: "use",
+    },
+    hideVaultLinguisticFeatures: true,
+    learnedVaultRelationCacheLimit: 500,
+    ollamaGeneratedTagsCap: 100,
+    ollamaBaseUrl: "http://127.0.0.1:11434",
+    ollamaModel: "qwen3:8b",
+    duplicateDetectionMode: "exact-visual",
+    exactDuplicateAction: "ask",
+    visualDuplicateAction: "ask",
+    visualDuplicateThreshold: 8,
+    duplicateMigrateLinksOnReplace: true,
+    duplicateAutorenameOnReplace: true,
+    waitForDuplicateSourceProcessing: true,
+    parallelWorkers: 4,
+    queueBatchMaxWaitMs: 15000,
+    companionNoteCreationRetries: 2,
+    retryInitialWaitSeconds: 2,
+    maxProcessingAttempts: 3,
+};
+
+const BUILTIN_FEATURE_TEST_PROFILE_SETTINGS: Partial<AutotagSettings> = {
+    ...BUILTIN_DEV_PROFILE_SETTINGS,
+    folderPropertyMappings: [
+        {
+            id: "1789001282744-pl8zaikbl0h",
+            property: "folderTags1",
+            values: [],
+            valueSource: "automatic",
+            format: "[[Example]]",
+            aiCandidateMode: "all",
+            useAsAiCandidate: true,
+            useAsVaultCandidate: true,
+        },
+        {
+            id: "1789587774316-qmo1fi68t4a",
+            property: "folderTags2",
+            values: [],
+            valueSource: "automatic",
+            format: "",
+            aiCandidateMode: "all",
+            useAsAiCandidate: true,
+            useAsVaultCandidate: false,
+        },
+    ],
+    folderFallbackProperty: "customFallback",
+    folderFallbackFormat: "[[Example]]",
+    folderFallbackAiCandidateMode: "all",
+    folderFallbackUseAsAiCandidate: true,
+    folderFallbackUseAsVaultCandidate: false,
+    frontmatterTemplate: "folderTags1:\nfolderTags2:\ncustomFallback:\ncustomTextProperty:\n- EXTRA TEXT\ncustomAndGeoCountry:\n- EXtraaaaa TexTTT\nRegionAndCityOutputDifferentCustomFormats:\naiDescription:\naiDomains:\nembed:\nfiletype:\nlinktofile:\nvaultAwareness:",
+    geolocationProperties: [
+        {
+            id: "country",
+            field: "country",
+            property: "customAndGeoCountry",
+            format: "[[Example]]",
+        },
+        {
+            id: "1788715546405-e5u230ozo5v",
+            field: "region",
+            property: "RegionAndCityOutputDifferentCustomFormats",
+            format: "[[noFormat]]+ Example",
+        },
+        {
+            id: "1788715558589-whq5cb38pp",
+            field: "city",
+            property: "RegionAndCityOutputDifferentCustomFormats",
+            format: "[[Example]]",
+        },
+    ],
+    vaultAwarenessOutputPropertyName: "vaultAwareness",
+};
+
+const SETTINGS_PROFILE_CONTROLLED_KEYS: (keyof AutotagSettings)[] = [
     "basePath",
-    "bfmNewFileLocation",
-    "bfmFileNameFormat",
-    "clearDropdownExcludedProperties",
+    "moveOutsideFilesToBasePath",
+    "companionNoteFolder",
+    "companionNoteNameFormat",
     "hideLimitedFileTypeWarnings",
     "limitedFileTypeWarningSkips",
     "linkToFilePropertyEnabled",
@@ -539,39 +884,50 @@ const SETTINGS_PROFILE_CONTROLLED_KEYS: (keyof BfmAutotagSettings)[] = [
     "aiTagsPropertyEnabled",
     "aiTagsPropertyName",
     "aiTagsFormat",
+    "removeFolderTagsFromAiTags",
+    "removeGeolocationFromAiTags",
     "aiTagsUseAsVaultCandidate",
     "aiDescriptionPropertyEnabled",
     "aiDescriptionPropertyName",
     "useGeolocationForAiDescription",
+    "useGeolocationForAiTags",
+    "imageAnalysisEnabled",
+    "ollamaVisionModel",
+    "ollamaVisionPrompt",
+    "aiDescriptionMinimumWords",
     "shutdownProtectionEnabled",
     "autoProcessUnprocessedOnReload",
     "deleteLinkedFilePair",
-    "createMissingCompanionNote",
-    "deleteLonelyFileWithoutCompanion",
-    "useDuplicateProtection",
     "folderPropertyMappings",
+    "folderPropertyManualValueMemory",
     "folderFallbackProperty",
     "folderFallbackFormat",
+    "folderFallbackAiCandidateMode",
     "folderFallbackUseAsAiCandidate",
     "folderFallbackUseAsVaultCandidate",
     "useFolderTags",
     "templateSource",
     "frontmatterTemplate",
+    "templateFilePath",
     "writeImageEmbedInBody",
     "geolocationEnabled",
     "geolocationProvider",
     "geolocationLocalUrl",
     "geolocationProperties",
     "aiTaggingEnabled",
-    "folderTagsCandidateMode",
-    "manualEnrichmentRules",
-    "manualSubjectBridgeRules",
+    "bridgeRules",
     "bridgeEnabled",
+    "manualEnrichmentEnabled",
+    "bridgeUseAiInput",
+    "bridgeUseFilenameInput",
+    "bridgeUseFolderInput",
+    "bridgeUseGeolocationInput",
     "bridgeUsePreBridgeVaultAwarenessOutput",
     "bridgeLinguisticFeatures",
     "hideBridgeLinguisticFeatures",
     "excludedVocabularyTerms",
     "filenameCandidateMode",
+    "filenameCandidatesHumanReadableOnly",
     "maxPromptVocabularyTerms",
     "vaultAwarenessEnabled",
     "maxVaultAwareAdditions",
@@ -581,6 +937,7 @@ const SETTINGS_PROFILE_CONTROLLED_KEYS: (keyof BfmAutotagSettings)[] = [
     "vaultAwarenessOutputExclusive",
     "vaultLinguisticFeatures",
     "hideVaultLinguisticFeatures",
+    "learnedVaultRelationCacheLimit",
     "ollamaGeneratedTagsCap",
     "ollamaBaseUrl",
     "ollamaModel",
@@ -592,9 +949,9 @@ const SETTINGS_PROFILE_CONTROLLED_KEYS: (keyof BfmAutotagSettings)[] = [
     "duplicateAutorenameOnReplace",
     "waitForDuplicateSourceProcessing",
     "parallelWorkers",
-    "bfmNoteMaxWaitMs",
-    "bfmNotePollIntervalMs",
     "queueBatchMaxWaitMs",
+    "companionNoteCreationRetries",
+    "retryInitialWaitSeconds",
     "maxProcessingAttempts",
 ];
 
@@ -608,6 +965,29 @@ const RECOMMENDED_TAGGING_MODELS = [
     { name: "gemma3:4b", label: "gemma3:4b" },
     { name: "phi4-mini", label: "phi4-mini" },
 ];
+
+const RECOMMENDED_VISION_MODELS = [
+    { name: "llava-llama3", label: "llava-llama3 (8B) [default]" },
+    { name: "llama3.2-vision:11b", label: "llama3.2-vision (11B)" },
+    { name: "llama3.2-vision:90b", label: "llama3.2-vision (90B)" },
+    { name: "llava:7b", label: "llava (7B)" },
+    { name: "llava:13b", label: "llava (13B)" },
+    { name: "llava:34b", label: "llava (34B)" },
+    { name: "gemma3:4b", label: "gemma3 (4B)" },
+    { name: "gemma3:12b", label: "gemma3 (12B)" },
+    { name: "gemma3:27b", label: "gemma3 (27B)" },
+    { name: "minicpm-v:8b", label: "minicpm-v (8B)" },
+    { name: "bakllava", label: "bakllava" },
+    { name: "moondream", label: "moondream" },
+];
+
+const AUTOTAG_SOURCE_FILE_EXTENSIONS = new Set([
+    "jpg", "jpeg", "jfif", "png", "webp", "gif", "bmp", "avif", "heic", "heif", "tif", "tiff", "jxl", "svg", "ico",
+    "psd", "psb", "raw", "dng", "cr2", "cr3", "nef", "arw", "rw2", "orf", "raf",
+    "mp4", "m4v", "mov", "webm", "mkv", "avi", "wmv",
+    "mp3", "wav", "m4a", "flac", "ogg", "opus",
+    "pdf",
+]);
 
 const QUEUE_BATCH_DELAY_MS = 1000;
 const PUBLIC_NOMINATIM_DELAY_MS = 2000;
@@ -630,12 +1010,12 @@ const GEOLOCATION_FIELD_OPTIONS: { field: GeolocationField; label: string; defau
 ];
 
 const LIMITED_FILE_TYPE_WARNINGS: LimitedFileTypeWarningDefinition[] = [
-    { extension: "avif", label: "AVIF", description: "Modern compressed image. AI description and visual duplicate preview support depend on Obsidian, Electron, and AI Image Analyzer support." },
+    { extension: "avif", label: "AVIF", description: "Modern compressed image. AI description and visual duplicate preview support depend on Obsidian, Electron, and the selected Ollama vision model." },
     { extension: "heic", label: "HEIC", description: "Apple/iPhone photo container. Autotag can create notes and exact hashes, but AI description, previews, and GPS parsing may depend on external support." },
     { extension: "heif", label: "HEIF", description: "Apple/iPhone image container. Autotag can create notes and exact hashes, but AI description, previews, and GPS parsing may depend on external support." },
     { extension: "tif", label: "TIFF", description: "Archival image format. Large files or uncommon encodings may fail in AI description or visual duplicate preview." },
     { extension: "tiff", label: "TIFF", description: "Archival image format. Large files or uncommon encodings may fail in AI description or visual duplicate preview." },
-    { extension: "jxl", label: "JPEG XL", description: "JPEG XL is not consistently supported by Electron or analyzer plugins yet." },
+    { extension: "jxl", label: "JPEG XL", description: "JPEG XL is not consistently supported by Electron or local vision models yet." },
     { extension: "svg", label: "SVG", description: "Vector images may render in Obsidian, but AI image analysis and metadata extraction may behave differently from raster images." },
     { extension: "ico", label: "ICO", description: "Icon containers may include multiple embedded image sizes and may not analyze like ordinary images." },
     { extension: "psd", label: "Photoshop PSD", description: "Layered Photoshop documents usually need export to a flat image before image analysis can read them reliably." },
@@ -651,8 +1031,8 @@ const LIMITED_FILE_TYPE_WARNINGS: LimitedFileTypeWarningDefinition[] = [
     { extension: "raf", label: "Fujifilm RAF", description: "Camera raw files usually need conversion before image analysis, visual preview hashing, or metadata extraction can work reliably." },
 ];
 
-export default class BfmAutotagPlugin extends Plugin {
-    settings: BfmAutotagSettings;
+export default class AutotagPlugin extends Plugin {
+    settings: AutotagSettings;
     processingQueue = new Map<string, QueuedProcessingFile>();
     queueFlushTimer: number | null = null;
     queueBatchStartedAt: number | null = null;
@@ -680,9 +1060,17 @@ export default class BfmAutotagPlugin extends Plugin {
     activeProcessingTotal = 0;
     activeProcessingCompleted = 0;
     activeWorkerPaths = new Set<string>();
-    settingTab: BfmAutotagSettingTab | null = null;
+    recentAutoMovedSourcePaths = new Map<string, string>();
+    settingTab: AutotagSettingTab | null = null;
+    startupAutoProcessTimer: number | null = null;
+    vaultVocabularyBuildTimer: number | null = null;
+    automaticFolderPropertySyncTimer: number | null = null;
+    vaultVocabularyBuildGeneration = 0;
+    expensiveHealthCountsCache: ExpensiveHealthCounts | null = null;
     private isApplyingSettingsProfile = false;
     private settingsProfileSnapshot = "";
+    private isUnloading = false;
+    private settingsSaveChain: Promise<void> = Promise.resolve();
     createRunId(path: string): string {
         return Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10) + "-" + path;
     }
@@ -707,15 +1095,18 @@ export default class BfmAutotagPlugin extends Plugin {
     }
 
     getPairRecordForImagePath(imagePath: string): PairRecord | null {
-        return this.getPairRecords().find(record => record.imagePath === imagePath) ?? null;
+        return this.getPairRecords().find(record => this.areVaultPathsSame(record.imagePath, imagePath)) ?? null;
     }
 
     getPairRecordForNotePath(notePath: string): PairRecord | null {
-        return this.getPairRecords().find(record => record.notePath === notePath) ?? null;
+        return this.getPairRecords().find(record => record.notePath && this.areVaultPathsSame(record.notePath, notePath)) ?? null;
     }
 
     getPairRecordForPath(path: string): PairRecord | null {
-        return this.getPairRecords().find(record => record.imagePath === path || record.notePath === path) ?? null;
+        return this.getPairRecords().find(record =>
+            this.areVaultPathsSame(record.imagePath, path)
+            || (!!record.notePath && this.areVaultPathsSame(record.notePath, path))
+        ) ?? null;
     }
 
     ensurePairRecordForImage(imagePath: string): PairRecord {
@@ -746,7 +1137,10 @@ export default class BfmAutotagPlugin extends Plugin {
 
     removePairRecordsForPath(path: string): boolean {
         const records = this.getPairRecords();
-        const filtered = records.filter(record => record.imagePath !== path && record.notePath !== path);
+        const filtered = records.filter(record =>
+            !this.areVaultPathsSame(record.imagePath, path)
+            && !this.areVaultPathsSame(record.notePath, path)
+        );
         if (filtered.length === records.length) return false;
         this.settings.pairRecords = filtered;
         return true;
@@ -756,12 +1150,12 @@ export default class BfmAutotagPlugin extends Plugin {
         let changed = false;
         this.settings.pairRecords = this.getPairRecords().map(record => {
             const updated = { ...record };
-            if (updated.imagePath === oldPath) {
+            if (this.areVaultPathsSame(updated.imagePath, oldPath)) {
                 updated.imagePath = newPath;
                 updated.updatedAt = Date.now();
                 changed = true;
             }
-            if (updated.notePath === oldPath) {
+            if (this.areVaultPathsSame(updated.notePath, oldPath)) {
                 updated.notePath = newPath;
                 updated.updatedAt = Date.now();
                 changed = true;
@@ -775,7 +1169,10 @@ export default class BfmAutotagPlugin extends Plugin {
         const records = this.getPairRecords();
         let changed = false;
         this.getDuplicateRecords().forEach(duplicate => {
-            const existing = records.find(record => record.imagePath === duplicate.filePath || record.notePath === duplicate.notePath);
+            const existing = records.find(record =>
+                this.areVaultPathsSame(record.imagePath, duplicate.filePath)
+                || this.areVaultPathsSame(record.notePath, duplicate.notePath)
+            );
             if (existing) {
                 if (!existing.notePath && duplicate.notePath) {
                     existing.notePath = duplicate.notePath;
@@ -797,7 +1194,7 @@ export default class BfmAutotagPlugin extends Plugin {
     }
 
     isCurrentRun(path: string, runId: string): boolean {
-        return this.currentRunIds.get(path) === runId;
+        return this.getPathKeyValue(this.currentRunIds, path) === runId;
     }
 
     registerActiveRunPair(runId: string, pairId: string, imagePath: string, expectedNotePath: string): void {
@@ -812,7 +1209,11 @@ export default class BfmAutotagPlugin extends Plugin {
 
     getActiveRunPairForPath(path: string): ActiveRunPair | null {
         for (const pair of this.activeRunPairs.values()) {
-            if (pair.imagePath === path || pair.expectedNotePath === path || pair.resolvedNotePath === path) return pair;
+            if (
+                this.areVaultPathsSame(pair.imagePath, path)
+                || this.areVaultPathsSame(pair.expectedNotePath, path)
+                || this.areVaultPathsSame(pair.resolvedNotePath, path)
+            ) return pair;
         }
         return null;
     }
@@ -820,10 +1221,10 @@ export default class BfmAutotagPlugin extends Plugin {
     getLinkedFileFromActiveRunPair(path: string): TFile | null {
         const pair = this.getActiveRunPairForPath(path);
         if (!pair) return null;
-        const linkedPath = path === pair.imagePath
+        const linkedPath = this.areVaultPathsSame(path, pair.imagePath)
             ? pair.resolvedNotePath ?? pair.expectedNotePath
             : pair.imagePath;
-        const linked = this.app.vault.getAbstractFileByPath(linkedPath);
+        const linked = this.getVaultFileByPathFlexible(linkedPath);
         return linked instanceof TFile ? linked : null;
     }
 
@@ -833,7 +1234,11 @@ export default class BfmAutotagPlugin extends Plugin {
             return;
         }
         Array.from(this.activeRunPairs.entries()).forEach(([key, pair]) => {
-            if (pair.imagePath === path || pair.expectedNotePath === path || pair.resolvedNotePath === path) {
+            if (
+                this.areVaultPathsSame(pair.imagePath, path)
+                || this.areVaultPathsSame(pair.expectedNotePath, path)
+                || this.areVaultPathsSame(pair.resolvedNotePath, path)
+            ) {
                 this.activeRunPairs.delete(key);
             }
         });
@@ -843,15 +1248,15 @@ export default class BfmAutotagPlugin extends Plugin {
         this.activeRunPairs.forEach((pair, runId) => {
             const updated = { ...pair };
             let changed = false;
-            if (updated.imagePath === oldPath) {
+            if (this.areVaultPathsSame(updated.imagePath, oldPath)) {
                 updated.imagePath = newPath;
                 changed = true;
             }
-            if (updated.expectedNotePath === oldPath) {
+            if (this.areVaultPathsSame(updated.expectedNotePath, oldPath)) {
                 updated.expectedNotePath = newPath;
                 changed = true;
             }
-            if (updated.resolvedNotePath === oldPath) {
+            if (this.areVaultPathsSame(updated.resolvedNotePath, oldPath)) {
                 updated.resolvedNotePath = newPath;
                 changed = true;
             }
@@ -875,10 +1280,10 @@ export default class BfmAutotagPlugin extends Plugin {
     }
 
     doesPendingDuplicateActionUsePath(action: PendingDuplicateAction, path: string): boolean {
-        return action.newImagePath === path
-            || action.newNotePath === path
-            || action.originalImagePath === path
-            || action.originalNotePath === path;
+        return this.areVaultPathsSame(action.newImagePath, path)
+            || this.areVaultPathsSame(action.newNotePath, path)
+            || this.areVaultPathsSame(action.originalImagePath, path)
+            || this.areVaultPathsSame(action.originalNotePath, path);
     }
 
     cancelPendingDuplicateActionsForPath(path: string): boolean {
@@ -886,15 +1291,15 @@ export default class BfmAutotagPlugin extends Plugin {
         Array.from(this.pendingDuplicateActions.values()).forEach(action => {
             if (!this.doesPendingDuplicateActionUsePath(action, path)) return;
             this.pendingDuplicateActions.delete(action.runId);
-            this.processingQueue.delete(action.newImagePath);
-            this.currentRunIds.delete(action.newImagePath);
+            this.deletePathKey(this.processingQueue, action.newImagePath);
+            this.deletePathKey(this.currentRunIds, action.newImagePath);
             this.cleanupActiveRunPairsForPath(action.newImagePath, action.runId);
             this.duplicateFingerprintCache.delete(this.getRunCacheKey(action.newImagePath, action.runId));
             this.duplicateHandlingCache.delete(this.getRunCacheKey(action.newImagePath, action.runId));
             this.markDuplicateProcessingComplete(action.newImagePath, action.runId);
             if (this.removeProtectedJob(action.newImagePath)) changed = true;
             changed = true;
-            new Notice(`Maru\'s Autotag canceled duplicate action for ${action.newImagePath} because a required file was deleted.`);
+            new Notice(`Autotag canceled duplicate action for ${action.newImagePath} because a required file was deleted.`);
         });
         return changed;
     }
@@ -903,10 +1308,10 @@ export default class BfmAutotagPlugin extends Plugin {
         this.pendingDuplicateActions.forEach((action, runId) => {
             const updated = { ...action };
             let changed = false;
-            if (updated.newImagePath === oldPath) { updated.newImagePath = newPath; changed = true; }
-            if (updated.newNotePath === oldPath) { updated.newNotePath = newPath; changed = true; }
-            if (updated.originalImagePath === oldPath) { updated.originalImagePath = newPath; changed = true; }
-            if (updated.originalNotePath === oldPath) { updated.originalNotePath = newPath; changed = true; }
+            if (this.areVaultPathsSame(updated.newImagePath, oldPath)) { updated.newImagePath = newPath; changed = true; }
+            if (this.areVaultPathsSame(updated.newNotePath, oldPath)) { updated.newNotePath = newPath; changed = true; }
+            if (this.areVaultPathsSame(updated.originalImagePath, oldPath)) { updated.originalImagePath = newPath; changed = true; }
+            if (this.areVaultPathsSame(updated.originalNotePath, oldPath)) { updated.originalNotePath = newPath; changed = true; }
             if (changed) this.pendingDuplicateActions.set(runId, updated);
         });
     }
@@ -914,26 +1319,151 @@ export default class BfmAutotagPlugin extends Plugin {
     // AI LAYER (PUT HERE)
     // =========================
 
-    getAIImageAnalyzer(): AIImageAnalyzerAPI | undefined {
-        return (this.app as any)
-            .plugins
-            ?.plugins
-            ?.["ai-image-analyzer"]
-            ?.api;
+    getOllamaVisionModel(): string {
+        return this.settings.ollamaVisionModel?.trim() || DEFAULT_SETTINGS.ollamaVisionModel;
+    }
+
+    getOllamaVisionPrompt(): string {
+        return this.settings.ollamaVisionPrompt?.trim() || DEFAULT_SETTINGS.ollamaVisionPrompt;
+    }
+
+    getAiDescriptionMinimumWords(): number {
+        return this.clampSetting(
+            this.settings.aiDescriptionMinimumWords,
+            DEFAULT_SETTINGS.aiDescriptionMinimumWords,
+            20,
+            500
+        );
+    }
+
+    getOllamaVisionRequestPrompt(strict = false): string {
+        const minimumWords = this.getAiDescriptionMinimumWords();
+        const lengthInstruction = `Write at least ${minimumWords} words while remaining factual and avoiding repetition.`;
+        return strict
+            ? `${this.getOllamaVisionPrompt()} ${lengthInstruction} The minimum word count is required; expand concrete visible details before finishing.`
+            : `${this.getOllamaVisionPrompt()} ${lengthInstruction}`;
+    }
+
+    countDescriptionWords(value: string): number {
+        return (value.match(/[\p{L}\p{N}]+(?:['’-][\p{L}\p{N}]+)*/gu) ?? []).length;
+    }
+
+    arrayBufferToBase64(buffer: ArrayBuffer): string {
+        const bytes = new Uint8Array(buffer);
+        const chunkSize = 0x8000;
+        let binary = "";
+        for (let index = 0; index < bytes.length; index += chunkSize) {
+            binary += String.fromCharCode(...Array.from(bytes.subarray(index, index + chunkSize)));
+        }
+        return btoa(binary);
+    }
+
+    buildOllamaVisionRequestVariants(model: string, imageBase64: string): Record<string, unknown>[] {
+        const createBase = (strict: boolean) => ({
+            model,
+            stream: false,
+            options: {
+                temperature: 0.1,
+                num_predict: Math.max(1024, Math.min(2048, this.getAiDescriptionMinimumWords() * 3)),
+            },
+            messages: [
+                {
+                    role: "system",
+                    content: [
+                        "You create factual image descriptions for Obsidian companion notes.",
+                        "Return only natural description text.",
+                        "Describe only what is visible or explicitly provided.",
+                        "Do not invent people, places, dates, brands, events, metadata, filenames, image codes, or IDs.",
+                        "Do not include markdown headings, YAML, bullet points, or explanations.",
+                    ].join(" "),
+                },
+                {
+                    role: "user",
+                    content: this.getOllamaVisionRequestPrompt(strict),
+                    images: [imageBase64],
+                },
+            ],
+        });
+        const standardBase = createBase(false);
+        const strictBase = createBase(true);
+
+        const variants: Record<string, unknown>[] = [
+            { ...standardBase, ...( /qwen|gemma3/i.test(model) ? { think: false } : {} ) },
+            { ...standardBase },
+            { ...strictBase, ...( /qwen|gemma3/i.test(model) ? { think: false } : {} ) },
+            { ...strictBase },
+        ];
+
+        const seen = new Set<string>();
+        return variants.filter(variant => {
+            const key = JSON.stringify(variant);
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+        });
     }
 
     async analyzeImageFile(file: TFile): Promise<string | null> {
-        const analyzer = this.getAIImageAnalyzer();
+        if (!this.settings.imageAnalysisEnabled) return null;
 
-        if (!analyzer) {
-            new Notice("AI Image Analyzer not found");
+        const endpoint = this.getOllamaChatUrl();
+        const model = this.getOllamaVisionModel();
+        if (!endpoint || !model) {
+            new Notice("Image Analysis settings are incomplete");
             return null;
         }
 
         try {
-            return await analyzer.analyzeImage(file);
+            const imageBase64 = this.arrayBufferToBase64(await this.app.vault.readBinary(file));
+            const requestVariants = this.buildOllamaVisionRequestVariants(model, imageBase64);
+            let lastError = "unknown error";
+            let longestDescription: string | null = null;
+
+            for (let attempt = 0; attempt < requestVariants.length; attempt += 1) {
+                const requestBody = requestVariants[attempt];
+                const response = await requestUrl({
+                    url: endpoint,
+                    method: "POST",
+                    throw: false,
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(requestBody),
+                });
+
+                if (response.status < 200 || response.status >= 300) {
+                    lastError = `HTTP ${response.status}: ${response.text?.slice(0, 300) || "no response body"}`;
+                    console.warn("Autotag Ollama vision attempt failed", {
+                        attempt: attempt + 1,
+                        model,
+                        status: response.status,
+                        body: lastError,
+                    });
+                    continue;
+                }
+
+                const description = this.cleanHumanReadableAiDescriptionText(
+                    this.normalizeOllamaDescriptionText(this.extractOllamaMessageText(response.json))
+                );
+                if (description?.trim()) {
+                    const trimmedDescription = description.trim();
+                    const wordCount = this.countDescriptionWords(trimmedDescription);
+                    if (!longestDescription || wordCount > this.countDescriptionWords(longestDescription)) {
+                        longestDescription = trimmedDescription;
+                    }
+                    if (wordCount >= this.getAiDescriptionMinimumWords()) return trimmedDescription;
+                    lastError = `description contained ${wordCount}/${this.getAiDescriptionMinimumWords()} requested words`;
+                    continue;
+                }
+                lastError = "empty description";
+            }
+
+            if (longestDescription) {
+                console.warn(`Autotag Ollama vision did not reach the requested minimum for ${file.path}: ${lastError}. Using the longest factual response.`);
+                return longestDescription;
+            }
+            console.warn(`Autotag Ollama vision returned no description for ${file.path}: ${lastError}`);
+            return null;
         } catch (e) {
-            console.error(e);
+            console.error("Autotag Ollama vision failed", e);
             return null;
         }
     }
@@ -985,7 +1515,7 @@ export default class BfmAutotagPlugin extends Plugin {
                 throw new Error("Stale duplicate fingerprint result ignored");
             }
             const visualHash = this.isDuplicateProtectionActive() && this.settings.duplicateDetectionMode === "exact-visual"
-                ? await this.computeVisualHash(file).catch(error => { console.warn("Maru\'s Autotag visual duplicate hash failed", error); return undefined; })
+                ? await this.computeVisualHash(file).catch(error => { console.warn("Autotag visual duplicate hash failed", error); return undefined; })
                 : undefined;
             if (runId && !this.isCurrentRun(file.path, runId)) {
                 throw new Error("Stale duplicate fingerprint result ignored");
@@ -1002,7 +1532,7 @@ export default class BfmAutotagPlugin extends Plugin {
         if (!this.isDuplicateProtectionActive()) return;
         void this.getDuplicateFingerprint(file, runId).catch(error => {
             if (runId && !this.isCurrentRun(file.path, runId)) return;
-            console.warn("Maru\'s Autotag duplicate fingerprint precompute failed", error);
+            console.warn("Autotag duplicate fingerprint precompute failed", error);
         });
     }
 
@@ -1024,7 +1554,7 @@ export default class BfmAutotagPlugin extends Plugin {
     }
 
     findDuplicateMatch(filePath: string, exactHash: string, visualHash?: string): DuplicateMatch | null {
-        const records = this.getDuplicateRecords().filter(record => record.filePath !== filePath);
+        const records = this.getDuplicateRecords().filter(record => !this.areVaultPathsSame(record.filePath, filePath));
         const exactMatch = records.find(record => record.exactHash === exactHash);
         if (exactMatch) return { type: "exact", record: exactMatch, similarity: 100, distance: 0 };
         if (!this.isDuplicateProtectionActive() || this.settings.duplicateDetectionMode !== "exact-visual" || !visualHash) return null;
@@ -1045,7 +1575,7 @@ export default class BfmAutotagPlugin extends Plugin {
     }
 
     upsertDuplicateRecord(record: DuplicateRecord): void {
-        const records = this.getDuplicateRecords().filter(existing => existing.filePath !== record.filePath);
+        const records = this.getDuplicateRecords().filter(existing => !this.areVaultPathsSame(existing.filePath, record.filePath));
         records.push(record);
         this.settings.duplicateRecords = records;
         const pairRecord = this.getPairRecordForImagePath(record.filePath) ?? this.ensurePairRecordForImage(record.filePath);
@@ -1054,7 +1584,10 @@ export default class BfmAutotagPlugin extends Plugin {
 
     removeDuplicateRecordsForPath(path: string): boolean {
         const records = this.getDuplicateRecords();
-        const filtered = records.filter(record => record.filePath !== path && record.notePath !== path);
+        const filtered = records.filter(record =>
+            !this.areVaultPathsSame(record.filePath, path)
+            && !this.areVaultPathsSame(record.notePath, path)
+        );
         const pairChanged = this.removePairRecordsForPath(path);
         if (filtered.length === records.length) return pairChanged;
         this.settings.duplicateRecords = filtered;
@@ -1065,12 +1598,12 @@ export default class BfmAutotagPlugin extends Plugin {
         let changed = this.updatePairRecordsForRename(oldPath, newPath);
         this.settings.duplicateRecords = this.getDuplicateRecords().map(record => {
             const updated = { ...record };
-            if (updated.filePath === oldPath) {
+            if (this.areVaultPathsSame(updated.filePath, oldPath)) {
                 updated.filePath = newPath;
                 if (newNotePath) updated.notePath = newNotePath;
                 changed = true;
             }
-            if (updated.notePath === oldPath) {
+            if (this.areVaultPathsSame(updated.notePath, oldPath)) {
                 updated.notePath = newPath;
                 changed = true;
             }
@@ -1079,22 +1612,43 @@ export default class BfmAutotagPlugin extends Plugin {
         return changed;
     }
     isDuplicateProtectionActive(): boolean {
-        return this.settings.useDuplicateProtection && this.settings.duplicateDetectionMode !== "off";
+        return this.settings.duplicateDetectionMode !== "off";
     }
 
     getUnlinkedDuplicateRecords(): DuplicateRecord[] {
         return this.getDuplicateRecords().filter(record => {
-            const image = this.app.vault.getAbstractFileByPath(record.filePath);
-            const note = this.app.vault.getAbstractFileByPath(record.notePath);
+            const image = this.getVaultFileByPathFlexible(record.filePath);
+            const note = this.getVaultFileByPathFlexible(record.notePath);
             return !(image instanceof TFile) || !(note instanceof TFile);
         });
     }
 
     getHashableBaseFiles(): TFile[] {
         return this.app.vault.getFiles()
-            .filter(file => file.path.startsWith(this.settings.basePath))
+            .filter(file => this.isPathInBasePath(file.path))
             .filter(file => file.extension.toLowerCase() !== "md")
             .sort((a, b) => a.path.localeCompare(b.path));
+    }
+
+    invalidateExpensiveHealthCounts(): void {
+        this.expensiveHealthCountsCache = null;
+    }
+
+    getExpensiveHealthCounts(maxAgeMs = 5000): ExpensiveHealthCounts {
+        const now = Date.now();
+        if (this.expensiveHealthCountsCache && now - this.expensiveHealthCountsCache.updatedAt < maxAgeMs) {
+            return this.expensiveHealthCountsCache;
+        }
+
+        const counts: ExpensiveHealthCounts = {
+            updatedAt: now,
+            duplicateUnlinkedHashCount: this.getUnlinkedDuplicateRecords().length,
+            duplicateUnhashedFileCount: this.getUnhashedFiles().length,
+            duplicateUnpairedFileCount: this.getUnpairedFiles().length,
+            recoverUnprocessedBaseFileCount: this.getUnprocessedBaseFiles().length,
+        };
+        this.expensiveHealthCountsCache = counts;
+        return counts;
     }
 
     getLimitedFileTypeWarning(extension: string): LimitedFileTypeWarningDefinition | null {
@@ -1133,21 +1687,42 @@ export default class BfmAutotagPlugin extends Plugin {
         ).open();
     }
 
+    isAutotagSourceFileExtension(extension: string): boolean {
+        const normalizedExtension = extension.replace(/^\./, "").trim().toLowerCase();
+        return AUTOTAG_SOURCE_FILE_EXTENSIONS.has(normalizedExtension);
+    }
+
     getUnhashedFiles(): TFile[] {
-        const hashedPaths = new Set(this.getDuplicateRecords().map(record => record.filePath));
-        return this.getHashableBaseFiles().filter(file => !hashedPaths.has(file.path));
+        const hashedPaths = new Set(this.getDuplicateRecords().map(record => this.getVaultPathKey(record.filePath)));
+        return this.getHashableBaseFiles().filter(file => !hashedPaths.has(this.getVaultPathKey(file.path)));
+    }
+
+    hasUsableDuplicateIndexForFile(file: TFile): boolean {
+        const record = this.getDuplicateRecords().find(item => this.areVaultPathsSame(item.filePath, file.path));
+        if (!record?.exactHash) return false;
+        if (this.settings.duplicateDetectionMode === "exact-visual" && !record.visualHash) return false;
+
+        const note = record.notePath ? this.getVaultFileByPathFlexible(record.notePath) : null;
+        if (!(note instanceof TFile)) return false;
+
+        const pair = this.getPairRecordForImagePath(file.path) ?? this.getPairRecordForNotePath(record.notePath);
+        return !!pair?.notePath && this.areVaultPathsSame(pair.imagePath, file.path) && this.areVaultPathsSame(pair.notePath, note.path);
+    }
+
+    getUnprocessedFilesNeedingDuplicateIndex(): TFile[] {
+        return this.getUnprocessedBaseFiles().filter(file => !this.hasUsableDuplicateIndexForFile(file));
     }
 
     getManualPairImageFiles(): TFile[] {
         return this.app.vault.getFiles()
-            .filter(file => file.path.startsWith(this.settings.basePath))
+            .filter(file => this.isPathInBasePath(file.path))
             .filter(file => file.extension.toLowerCase() !== "md")
             .sort((a, b) => a.path.localeCompare(b.path));
     }
 
     getManualPairNoteFiles(): TFile[] {
         return this.app.vault.getFiles()
-            .filter(file => file.path.startsWith(this.settings.bfmNewFileLocation))
+            .filter(file => this.isPathInBfmNewFileLocation(file.path))
             .filter(file => file.extension.toLowerCase() === "md")
             .sort((a, b) => a.path.localeCompare(b.path));
     }
@@ -1180,7 +1755,7 @@ export default class BfmAutotagPlugin extends Plugin {
             .replace(/[<>:"/\\|?*\x00-\x1f]/g, " ")
             .replace(/\s+/g, " ")
             .trim() || "General";
-        return `Maru\'s Autotag Review/${cleanedName}`.replace(/\\/g, "/").replace(/\/+/g, "/");
+        return `Autotag Review/${cleanedName}`.replace(/\\/g, "/").replace(/\/+/g, "/");
     }
 
     getVaultRootFullPath(): string | null {
@@ -1232,7 +1807,7 @@ export default class BfmAutotagPlugin extends Plugin {
             const directResult = await openDialog(electron.dialog);
             if (directResult !== undefined) return directResult;
         } catch (error) {
-            console.warn("Maru\'s Autotag move-folder dialog unavailable", error);
+            console.warn("Autotag move-folder dialog unavailable", error);
         }
 
         return undefined;
@@ -1252,9 +1827,10 @@ export default class BfmAutotagPlugin extends Plugin {
         const seen = new Set<string>();
         const files: TFile[] = [];
         paths.forEach(path => {
-            if (!path || seen.has(path)) return;
-            seen.add(path);
-            const file = this.app.vault.getAbstractFileByPath(path);
+            const pathKey = this.getVaultPathKey(path);
+            if (!pathKey || seen.has(pathKey)) return;
+            seen.add(pathKey);
+            const file = this.getVaultFileByPathFlexible(path);
             if (file instanceof TFile) files.push(file);
         });
         return files.sort((a, b) => a.path.localeCompare(b.path));
@@ -1291,6 +1867,53 @@ export default class BfmAutotagPlugin extends Plugin {
         }
     }
 
+    isAutoMoveEligibleNewFile(file: TFile): boolean {
+        const extension = file.extension.toLowerCase();
+        if (!extension || extension === "md") return false;
+        if (!this.isAutotagSourceFileExtension(extension)) return false;
+        if (this.isPathInBasePath(file.path) || this.isPathInBfmNewFileLocation(file.path)) return false;
+
+        const pathSegments = this.normalizeVaultPath(file.path).split("/");
+        if (pathSegments.some(segment => segment.startsWith(".") || segment === "node_modules")) return false;
+
+        return true;
+    }
+
+    async moveNewFileIntoBasePathIfNeeded(file: TFile): Promise<TFile | null> {
+        if (!this.settings.moveOutsideFilesToBasePath) return file;
+        if (!this.isAutoMoveEligibleNewFile(file)) return file;
+
+        const targetFolder = this.getEffectiveBasePath();
+        try {
+            await this.ensureVaultFolder(targetFolder);
+            const targetPath = await this.getAvailableMovePath(targetFolder, file);
+            if (targetPath === file.path) return file;
+
+            const oldPath = file.path;
+            await this.app.fileManager.renameFile(file, targetPath);
+            const movedFile = this.app.vault.getAbstractFileByPath(targetPath);
+            if (!(movedFile instanceof TFile)) {
+                new Notice(`Moved ${file.name}, but could not resolve the new file path.`);
+                return null;
+            }
+            if (this.updateInternalReferencesForMovedFile(oldPath, targetPath, movedFile)) {
+                await this.saveSettings();
+            }
+            this.recentAutoMovedSourcePaths.set(targetPath, oldPath);
+            window.setTimeout(() => {
+                if (this.recentAutoMovedSourcePaths.get(targetPath) === oldPath) {
+                    this.recentAutoMovedSourcePaths.delete(targetPath);
+                }
+            }, 5 * 60 * 1000);
+            new Notice(`Moved ${movedFile.name} into the managed source folder.`);
+            return movedFile;
+        } catch (error) {
+            console.warn("Autotag could not move new file into the managed source folder.", file.path, error);
+            new Notice(`Could not move ${file.name} into the managed source folder.`);
+            return null;
+        }
+    }
+
     updateInternalReferencesForMovedFile(oldPath: string, newPath: string, file: TFile): boolean {
         let changed = false;
         const failedFile = this.getFailedFile(oldPath);
@@ -1298,11 +1921,11 @@ export default class BfmAutotagPlugin extends Plugin {
             failedFile.path = newPath;
             changed = true;
         }
-        const renamedImageNotePath = file.extension.toLowerCase() === "md" ? undefined : this.getBfmNotePath(file);
+        const renamedImageNotePath = file.extension.toLowerCase() === "md" ? undefined : this.getCompanionNotePath(file);
         if (this.updateDuplicateRecordsForRename(oldPath, newPath, renamedImageNotePath)) changed = true;
         if (this.updateProtectedJobPath(oldPath, newPath, renamedImageNotePath)) changed = true;
         if (this.updatePendingGeocodeJobsForRename(oldPath, newPath)) changed = true;
-        const processedIndex = this.settings.processedFiles.indexOf(oldPath);
+        const processedIndex = this.settings.processedFiles.findIndex(processedPath => this.areVaultPathsSame(processedPath, oldPath));
         if (processedIndex !== -1) {
             this.settings.processedFiles.splice(processedIndex, 1, newPath);
             changed = true;
@@ -1348,7 +1971,7 @@ export default class BfmAutotagPlugin extends Plugin {
 
         for (let index = 0; index < uniqueFiles.length; index += 1) {
             const originalFile = uniqueFiles[index];
-            const currentFile = this.app.vault.getAbstractFileByPath(originalFile.path);
+            const currentFile = this.getVaultFileByPathFlexible(originalFile.path);
             if (!(currentFile instanceof TFile)) {
                 failed += 1;
                 progress.setProgress(index + 1, `Moving ${index + 1}/${uniqueFiles.length}`);
@@ -1377,7 +2000,7 @@ export default class BfmAutotagPlugin extends Plugin {
                 moved += 1;
             } catch (error) {
                 failed += 1;
-                console.warn("Maru\'s Autotag could not move affected file", oldPath, targetPath, error);
+                console.warn("Autotag could not move affected file", oldPath, targetPath, error);
             }
             progress.setProgress(index + 1, `Moving ${index + 1}/${uniqueFiles.length}`);
             if ((index + 1) % 20 === 0) await this.sleep(1);
@@ -1401,7 +2024,7 @@ export default class BfmAutotagPlugin extends Plugin {
         let failed = 0;
         let changed = false;
         for (const file of files) {
-            const currentFile = this.app.vault.getAbstractFileByPath(file.path);
+            const currentFile = this.getVaultFileByPathFlexible(file.path);
             if (!(currentFile instanceof TFile)) {
                 if (this.cleanupProcessingStateForPath(file.path)) changed = true;
                 continue;
@@ -1412,7 +2035,7 @@ export default class BfmAutotagPlugin extends Plugin {
                 deleted += 1;
             } catch (error) {
                 failed += 1;
-                console.warn("Maru\'s Autotag could not delete unpaired file", file.path, error);
+                console.warn("Autotag could not delete unpaired file", file.path, error);
             }
         }
         if (changed) await this.saveSettings();
@@ -1420,7 +2043,7 @@ export default class BfmAutotagPlugin extends Plugin {
     }
 
     isPathProcessing(path: string): boolean {
-        if (this.currentRunIds.has(path) || this.processingQueue.has(path)) return true;
+        if (this.hasPathKey(this.currentRunIds, path) || this.hasPathKey(this.processingQueue, path)) return true;
         if (this.getActiveRunPairForPath(path)) return true;
         for (const action of this.pendingDuplicateActions.values()) {
             if (!action.processingComplete && this.doesPendingDuplicateActionUsePath(action, path)) return true;
@@ -1429,8 +2052,8 @@ export default class BfmAutotagPlugin extends Plugin {
     }
 
     isPathActivelyProcessing(path: string): boolean {
-        return this.currentRunIds.has(path)
-            || this.processingQueue.has(path)
+        return this.hasPathKey(this.currentRunIds, path)
+            || this.hasPathKey(this.processingQueue, path)
             || !!this.getActiveRunPairForPath(path);
     }
 
@@ -1452,18 +2075,18 @@ export default class BfmAutotagPlugin extends Plugin {
     }
 
     async manualPairFiles(imagePath: string, notePath: string): Promise<void> {
-        const image = this.app.vault.getAbstractFileByPath(imagePath);
-        const note = this.app.vault.getAbstractFileByPath(notePath);
+        const image = this.getVaultFileByPathFlexible(imagePath);
+        const note = this.getVaultFileByPathFlexible(notePath);
         if (!(image instanceof TFile) || !(note instanceof TFile)) {
             new Notice("Manual pairing needs two existing files.");
             return;
         }
-        if (!image.path.startsWith(this.settings.basePath) || image.extension.toLowerCase() === "md") {
+        if (!this.isPathInBasePath(image.path) || image.extension.toLowerCase() === "md") {
             new Notice("Manual pairing image/source must be a non-markdown file inside the Base Path.");
             return;
         }
-        if (!note.path.startsWith(this.settings.bfmNewFileLocation) || note.extension.toLowerCase() !== "md") {
-            new Notice("Manual pairing companion must be a markdown note inside the BFM New File Location.");
+        if (!this.isPathInBfmNewFileLocation(note.path) || note.extension.toLowerCase() !== "md") {
+            new Notice("Manual pairing companion must be a markdown note inside the Companion Note Folder.");
             return;
         }
         const isProcessing = this.isPathProcessing(image.path) || this.isPathProcessing(note.path);
@@ -1485,18 +2108,18 @@ export default class BfmAutotagPlugin extends Plugin {
     }
 
     async manualPairFilesImmediate(imagePath: string, notePath: string, showNotice = true, saveAfterPairing = true): Promise<void> {
-        const image = this.app.vault.getAbstractFileByPath(imagePath);
-        const note = this.app.vault.getAbstractFileByPath(notePath);
+        const image = this.getVaultFileByPathFlexible(imagePath);
+        const note = this.getVaultFileByPathFlexible(notePath);
         if (!(image instanceof TFile) || !(note instanceof TFile)) {
             new Notice("Manual pairing needs two existing files.");
             return;
         }
-        if (!image.path.startsWith(this.settings.basePath) || image.extension.toLowerCase() === "md") {
+        if (!this.isPathInBasePath(image.path) || image.extension.toLowerCase() === "md") {
             new Notice("Manual pairing image/source must be a non-markdown file inside the Base Path.");
             return;
         }
-        if (!note.path.startsWith(this.settings.bfmNewFileLocation) || note.extension.toLowerCase() !== "md") {
-            new Notice("Manual pairing companion must be a markdown note inside the BFM New File Location.");
+        if (!this.isPathInBfmNewFileLocation(note.path) || note.extension.toLowerCase() !== "md") {
+            new Notice("Manual pairing companion must be a markdown note inside the Companion Note Folder.");
             return;
         }
 
@@ -1509,10 +2132,10 @@ export default class BfmAutotagPlugin extends Plugin {
             record.pairId !== pairId
             && record.pairId !== imagePair?.pairId
             && record.pairId !== notePair?.pairId
-            && record.imagePath !== image.path
-            && record.notePath !== image.path
-            && record.imagePath !== note.path
-            && record.notePath !== note.path
+            && !this.areVaultPathsSame(record.imagePath, image.path)
+            && !this.areVaultPathsSame(record.notePath, image.path)
+            && !this.areVaultPathsSame(record.imagePath, note.path)
+            && !this.areVaultPathsSame(record.notePath, note.path)
         );
         this.settings.pairRecords.push({
             pairId,
@@ -1522,9 +2145,9 @@ export default class BfmAutotagPlugin extends Plugin {
             updatedAt: now,
         });
 
-        const imageRecord = this.getDuplicateRecords().find(record => record.filePath === image.path);
+        const imageRecord = this.getDuplicateRecords().find(record => this.areVaultPathsSame(record.filePath, image.path));
         this.settings.duplicateRecords = this.getDuplicateRecords()
-            .filter(record => record.filePath !== image.path && record.notePath !== note.path);
+            .filter(record => !this.areVaultPathsSame(record.filePath, image.path) && !this.areVaultPathsSame(record.notePath, note.path));
         if (imageRecord) {
             this.settings.duplicateRecords.push({ ...imageRecord, filePath: image.path, notePath: note.path });
         }
@@ -1533,30 +2156,25 @@ export default class BfmAutotagPlugin extends Plugin {
     }
 
     async regenerateDuplicateHashes(): Promise<void> {
-        if (!this.settings.useDuplicateProtection) {
-            new Notice("Duplicate Protection is turned off.");
-            return;
-        }
-
         const files = this.getHashableBaseFiles();
         const records: DuplicateRecord[] = [];
         let failed = 0;
         for (const file of files) {
             try {
                 const exactHash = await this.computeExactHash(file);
-                const visualHash = this.isDuplicateProtectionActive() && this.settings.duplicateDetectionMode === "exact-visual"
+                const visualHash = this.settings.duplicateDetectionMode === "exact-visual"
                     ? await this.computeVisualHash(file).catch(() => undefined)
                     : undefined;
                 records.push({
                     filePath: file.path,
-                    notePath: this.getBfmNotePath(file),
+                    notePath: this.getCompanionNotePath(file),
                     exactHash,
                     visualHash,
                     processedAt: Date.now(),
                 });
             } catch (error) {
                 failed += 1;
-                console.warn("Maru\'s Autotag could not regenerate duplicate hash", file.path, error);
+                console.warn("Autotag could not regenerate duplicate hash", file.path, error);
             }
         }
 
@@ -1595,7 +2213,7 @@ export default class BfmAutotagPlugin extends Plugin {
         let failed = 0;
         let changed = false;
         for (const failedFile of failedFiles) {
-            const file = this.app.vault.getAbstractFileByPath(failedFile.path);
+            const file = this.getVaultFileByPathFlexible(failedFile.path);
             if (!(file instanceof TFile)) {
                 if (this.cleanupProcessingStateForPath(failedFile.path)) changed = true;
                 missing += 1;
@@ -1607,7 +2225,7 @@ export default class BfmAutotagPlugin extends Plugin {
                 deleted += 1;
             } catch (error) {
                 failed += 1;
-                console.warn("Maru\'s Autotag could not delete failed file", failedFile.path, error);
+                console.warn("Autotag could not delete failed file", failedFile.path, error);
             }
         }
         if (changed) await this.saveSettings();
@@ -1634,9 +2252,9 @@ export default class BfmAutotagPlugin extends Plugin {
         this.cleanupActiveRunPairsForPath(path, runId);
         this.clearPendingDuplicateAction(runId);
         let changed = false;
-        this.processingQueue.delete(path);
-        this.activeWorkerPaths.delete(path);
-        this.currentRunIds.delete(path);
+        this.deletePathKey(this.processingQueue, path);
+        this.deletePathFromSet(this.activeWorkerPaths, path);
+        this.deletePathKey(this.currentRunIds, path);
         this.duplicateFingerprintCache.delete(path);
         if (runId) this.duplicateFingerprintCache.delete(this.getRunCacheKey(path, runId));
         this.duplicateHandlingCache.delete(path);
@@ -1646,9 +2264,12 @@ export default class BfmAutotagPlugin extends Plugin {
         if (this.removeDuplicateRecordsForPath(path)) changed = true;
         if (this.removeProtectedJob(path)) changed = true;
         const beforeGeocodeJobs = this.settings.pendingGeocodeJobs.length;
-        this.settings.pendingGeocodeJobs = this.settings.pendingGeocodeJobs.filter(job => job.imagePath !== path && job.notePath !== path);
+        this.settings.pendingGeocodeJobs = this.settings.pendingGeocodeJobs.filter(job =>
+            !this.areVaultPathsSame(job.imagePath, path)
+            && !this.areVaultPathsSame(job.notePath, path)
+        );
         if (this.settings.pendingGeocodeJobs.length !== beforeGeocodeJobs) changed = true;
-        const index = this.settings.processedFiles.indexOf(path);
+        const index = this.settings.processedFiles.findIndex(processedPath => this.areVaultPathsSame(processedPath, path));
         if (index !== -1) {
             this.settings.processedFiles.splice(index, 1);
             changed = true;
@@ -1660,21 +2281,21 @@ export default class BfmAutotagPlugin extends Plugin {
         const activeLinked = this.getLinkedFileFromActiveRunPair(notePath);
         if (activeLinked instanceof TFile) return activeLinked;
         const pairRecord = this.getPairRecordForNotePath(notePath);
-        const pairImage = pairRecord ? this.app.vault.getAbstractFileByPath(pairRecord.imagePath) : null;
+        const pairImage = pairRecord ? this.getVaultFileByPathFlexible(pairRecord.imagePath) : null;
         if (pairImage instanceof TFile) return pairImage;
-        const record = this.getDuplicateRecords().find(item => item.notePath === notePath);
+        const record = this.getDuplicateRecords().find(item => this.areVaultPathsSame(item.notePath, notePath));
         if (record) {
-            const file = this.app.vault.getAbstractFileByPath(record.filePath);
+            const file = this.getVaultFileByPathFlexible(record.filePath);
             if (file instanceof TFile) return file;
         }
 
-        const job = this.settings.protectedJobs.find(item => item.notePath === notePath);
+        const job = this.settings.protectedJobs.find(item => item.notePath && this.areVaultPathsSame(item.notePath, notePath));
         if (job) {
-            const file = this.app.vault.getAbstractFileByPath(job.path);
+            const file = this.getVaultFileByPathFlexible(job.path);
             if (file instanceof TFile) return file;
         }
 
-        const note = this.app.vault.getAbstractFileByPath(notePath);
+        const note = this.getVaultFileByPathFlexible(notePath);
         const cache = note instanceof TFile ? this.app.metadataCache.getFileCache(note) : null;
         const frontmatter = cache?.frontmatter as Record<string, unknown> | undefined;
         const linkProperty = this.getLinkToFilePropertyName();
@@ -1682,40 +2303,49 @@ export default class BfmAutotagPlugin extends Plugin {
             ? this.extractPathFromWikiLink(frontmatter[linkProperty] as string)
             : null;
         if (linkedPath) {
-            const linkedFile = this.app.vault.getAbstractFileByPath(linkedPath);
+            const linkedFile = this.getVaultFileByPathFlexible(linkedPath);
             if (linkedFile instanceof TFile) return linkedFile;
         }
 
-        return this.getHashableBaseFiles().find(file => this.doesBfmNotePathMatchFile(notePath, file)) ?? null;
+        return this.getHashableBaseFiles().find(file => this.doesCompanionNotePathMatchFile(notePath, file)) ?? null;
     }
     findCompanionNoteForSourceFile(file: TFile): TFile | null {
         const activeLinked = this.getLinkedFileFromActiveRunPair(file.path);
         if (activeLinked instanceof TFile) return activeLinked;
         const pairRecord = this.getPairRecordForImagePath(file.path);
-        const pairNote = pairRecord?.notePath ? this.app.vault.getAbstractFileByPath(pairRecord.notePath) : null;
+        const pairNote = pairRecord?.notePath ? this.getVaultFileByPathFlexible(pairRecord.notePath) : null;
         if (pairNote instanceof TFile) return pairNote;
-        const record = this.getDuplicateRecords().find(item => item.filePath === file.path);
-        const recordNote = record ? this.app.vault.getAbstractFileByPath(record.notePath) : null;
+        const record = this.getDuplicateRecords().find(item => this.areVaultPathsSame(item.filePath, file.path));
+        const recordNote = record ? this.getVaultFileByPathFlexible(record.notePath) : null;
         if (recordNote instanceof TFile) return recordNote;
 
-        const job = this.settings.protectedJobs.find(item => item.path === file.path && item.notePath);
-        const jobNote = job?.notePath ? this.app.vault.getAbstractFileByPath(job.notePath) : null;
+        const job = this.settings.protectedJobs.find(item => this.areVaultPathsSame(item.path, file.path) && item.notePath);
+        const jobNote = job?.notePath ? this.getVaultFileByPathFlexible(job.notePath) : null;
         if (jobNote instanceof TFile) return jobNote;
 
-        return this.findBfmNoteVariant(file);
+        return this.findCompanionNoteVariant(file);
     }
 
     getLinkedFileForDeletion(file: TFile): TFile | null {
-        return file.path.startsWith(this.settings.basePath)
+        const pairRecord = this.getPairRecordForPath(file.path);
+        const linkedPairPath = pairRecord && this.areVaultPathsSame(pairRecord.imagePath, file.path)
+            ? pairRecord.notePath
+            : pairRecord?.notePath && this.areVaultPathsSame(pairRecord.notePath, file.path) ? pairRecord.imagePath : undefined;
+        if (linkedPairPath) {
+            const linkedPairFile = this.getVaultFileByPathFlexible(linkedPairPath);
+            if (linkedPairFile instanceof TFile) return linkedPairFile;
+        }
+
+        return this.isPathInBasePath(file.path)
             ? this.findCompanionNoteForSourceFile(file)
-            : file.path.startsWith(this.settings.bfmNewFileLocation)
+            : this.isPathInBfmNewFileLocation(file.path)
                 ? this.findSourceFileForCompanionNote(file.path)
                 : null;
     }
 
-    getFileContext(file: TFile): BfmAutotagFileContext {
-        const isWatchedSource = file.extension.toLowerCase() !== "md" && file.path.startsWith(this.settings.basePath);
-        const isCompanionNote = file.extension.toLowerCase() === "md" && file.path.startsWith(this.settings.bfmNewFileLocation);
+    getFileContext(file: TFile): AutotagFileContext {
+        const isWatchedSource = file.extension.toLowerCase() !== "md" && this.isPathInBasePath(file.path);
+        const isCompanionNote = file.extension.toLowerCase() === "md" && this.isPathInBfmNewFileLocation(file.path);
         const directPair = this.getPairRecordForPath(file.path);
         let sourceFile: TFile | null = isWatchedSource ? file : null;
         let companionNote: TFile | null = isCompanionNote ? file : null;
@@ -1727,11 +2357,11 @@ export default class BfmAutotagPlugin extends Plugin {
             companionNote = this.findCompanionNoteForSourceFile(file);
         }
         if (!sourceFile && directPair?.imagePath) {
-            const resolved = this.app.vault.getAbstractFileByPath(directPair.imagePath);
+            const resolved = this.getVaultFileByPathFlexible(directPair.imagePath);
             if (resolved instanceof TFile) sourceFile = resolved;
         }
         if (!companionNote && directPair?.notePath) {
-            const resolved = this.app.vault.getAbstractFileByPath(directPair.notePath);
+            const resolved = this.getVaultFileByPathFlexible(directPair.notePath);
             if (resolved instanceof TFile) companionNote = resolved;
         }
 
@@ -1764,7 +2394,7 @@ export default class BfmAutotagPlugin extends Plugin {
         window.setTimeout(() => this.settingTab?.openSection(sectionId), 0);
     }
 
-    createBfmAutotagContextMenuTitle(title: string, className: string): DocumentFragment {
+    createAutotagContextMenuTitle(title: string, className: string): DocumentFragment {
         const fragment = document.createDocumentFragment();
         const titleEl = document.createElement("span");
         titleEl.classList.add(className);
@@ -1773,14 +2403,14 @@ export default class BfmAutotagPlugin extends Plugin {
         return fragment;
     }
 
-    addBfmAutotagMenuLabel(menu: Menu, title: string, icon: string): void {
+    addAutotagMenuLabel(menu: Menu, title: string, icon: string): void {
         menu.addItem(item => item
-            .setTitle(this.createBfmAutotagContextMenuTitle(title, "bfm-autotag-context-menu-heading"))
+            .setTitle(this.createAutotagContextMenuTitle(title, "autotag-context-menu-heading"))
             .setIcon(icon)
             .setIsLabel(true));
     }
 
-    addBfmAutotagMenuItem(
+    addAutotagMenuItem(
         menu: Menu,
         title: string,
         icon: string,
@@ -1790,7 +2420,7 @@ export default class BfmAutotagPlugin extends Plugin {
     ): void {
         menu.addItem(item => {
             item
-                .setTitle(this.createBfmAutotagContextMenuTitle(title, "bfm-autotag-context-menu-action"))
+                .setTitle(this.createAutotagContextMenuTitle(title, "autotag-context-menu-action"))
                 .setIcon(icon)
                 .setDisabled(disabled)
                 .setWarning(warning)
@@ -1834,11 +2464,11 @@ export default class BfmAutotagPlugin extends Plugin {
         const context = this.getFileContext(file);
         const sourcePath = context.sourcePath;
         if (!sourcePath) {
-            new Notice("No source file path found for this Maru\'s Autotag item.");
+            new Notice("No source file path found for this Autotag item.");
             return;
         }
         const before = this.settings.processedFiles.length;
-        this.settings.processedFiles = this.settings.processedFiles.filter(path => path !== sourcePath);
+        this.settings.processedFiles = this.settings.processedFiles.filter(path => !this.areVaultPathsSame(path, sourcePath));
         if (this.settings.processedFiles.length === before) {
             new Notice("No processed state was stored for this file.");
             return;
@@ -1908,7 +2538,7 @@ export default class BfmAutotagPlugin extends Plugin {
         ).open();
     }
 
-    populateBfmAutotagFileSubmenu(menu: Menu, file: TFile): void {
+    populateAutotagFileSubmenu(menu: Menu, file: TFile): void {
         menu.setUseNativeMenu(false);
         const context = this.getFileContext(file);
         const hasManagedContext = context.isWatchedSource || context.isCompanionNote || !!context.pairRecord;
@@ -1916,45 +2546,45 @@ export default class BfmAutotagPlugin extends Plugin {
         const hasSourceFile = context.sourceFile instanceof TFile;
         const hasCompanionNote = context.companionNote instanceof TFile;
 
-        this.addBfmAutotagMenuLabel(menu, "Health", "activity");
-        this.addBfmAutotagMenuItem(menu, "Open Health", "activity", false, () => this.openSettingsSection("health"));
+        this.addAutotagMenuLabel(menu, "Health", "activity");
+        this.addAutotagMenuItem(menu, "Open Health", "activity", false, () => this.openSettingsSection("health"));
         menu.addSeparator();
 
-        this.addBfmAutotagMenuLabel(menu, "Setup", "wrench");
-        this.addBfmAutotagMenuItem(menu, "Open Maru\'s Autotag Settings", "settings", false, () => this.openSettingsSection("setup"));
+        this.addAutotagMenuLabel(menu, "Setup", "wrench");
+        this.addAutotagMenuItem(menu, "Open Autotag Settings", "settings", false, () => this.openSettingsSection("setup"));
         menu.addSeparator();
 
-        this.addBfmAutotagMenuLabel(menu, "Processing & Queue", "list-checks");
-        this.addBfmAutotagMenuItem(menu, "Reprocess with Maru\'s Autotag", "refresh-cw", !hasSourceFile && !context.isCompanionNote, () => this.reprocessFileFromContext(file));
+        this.addAutotagMenuLabel(menu, "Processing & Queue", "list-checks");
+        this.addAutotagMenuItem(menu, "Reprocess with Autotag", "refresh-cw", !hasSourceFile && !context.isCompanionNote, () => this.reprocessFileFromContext(file));
         menu.addSeparator();
 
-        this.addBfmAutotagMenuLabel(menu, "Duplicates", "copy-check");
-        this.addBfmAutotagMenuItem(menu, "Find duplicate pair", "search-check", !hasPair, () => this.showContextPairInfo(file));
-        this.addBfmAutotagMenuItem(menu, "Copy pair ID", "fingerprint", !context.pairRecord?.pairId, () => this.copyContextValueToClipboard(context.pairRecord?.pairId, "Pair ID copied.", "No pair ID found for this file."));
-        this.addBfmAutotagMenuItem(menu, "Copy image path", "image", !context.sourcePath, () => this.copyContextValueToClipboard(context.sourcePath, "Image path copied.", "No image path found for this file."));
-        this.addBfmAutotagMenuItem(menu, "Copy companion path", "file-text", !context.companionPath, () => this.copyContextValueToClipboard(context.companionPath, "Companion path copied.", "No companion path found for this file."));
-        this.addBfmAutotagMenuItem(menu, "Open Duplicates settings", "copy-check", false, () => this.openSettingsSection("duplicates"));
+        this.addAutotagMenuLabel(menu, "Duplicates", "copy-check");
+        this.addAutotagMenuItem(menu, "Find duplicate pair", "search-check", !hasPair, () => this.showContextPairInfo(file));
+        this.addAutotagMenuItem(menu, "Copy pair ID", "fingerprint", !context.pairRecord?.pairId, () => this.copyContextValueToClipboard(context.pairRecord?.pairId, "Pair ID copied.", "No pair ID found for this file."));
+        this.addAutotagMenuItem(menu, "Copy image path", "image", !context.sourcePath, () => this.copyContextValueToClipboard(context.sourcePath, "Image path copied.", "No image path found for this file."));
+        this.addAutotagMenuItem(menu, "Copy companion path", "file-text", !context.companionPath, () => this.copyContextValueToClipboard(context.companionPath, "Companion path copied.", "No companion path found for this file."));
+        this.addAutotagMenuItem(menu, "Open Duplicates settings", "copy-check", false, () => this.openSettingsSection("duplicates"));
         menu.addSeparator();
 
-        this.addBfmAutotagMenuLabel(menu, "Fix / Recover", "wrench");
-        this.addBfmAutotagMenuItem(menu, "Forget processed state", "eraser", !context.sourcePath, () => this.forgetProcessedStateForContext(file));
-        this.addBfmAutotagMenuItem(menu, "Clear failed state", "circle-x", !hasManagedContext, () => this.clearFailedStateForContext(file));
-        this.addBfmAutotagMenuItem(menu, "Create missing companion note", "file-plus", !hasSourceFile, () => this.createMissingCompanionFromContext(file));
-        this.addBfmAutotagMenuItem(menu, "Open Fix / Recover settings", "wrench", false, () => this.openSettingsSection("fix-recover"));
+        this.addAutotagMenuLabel(menu, "Fix / Recover", "wrench");
+        this.addAutotagMenuItem(menu, "Forget processed state", "eraser", !context.sourcePath, () => this.forgetProcessedStateForContext(file));
+        this.addAutotagMenuItem(menu, "Clear failed state", "circle-x", !hasManagedContext, () => this.clearFailedStateForContext(file));
+        this.addAutotagMenuItem(menu, "Create missing companion note", "file-plus", !hasSourceFile, () => this.createMissingCompanionFromContext(file));
+        this.addAutotagMenuItem(menu, "Open Fix / Recover settings", "wrench", false, () => this.openSettingsSection("fix-recover"));
         menu.addSeparator();
 
-        this.addBfmAutotagMenuLabel(menu, "QoL", "sliders-horizontal");
-        this.addBfmAutotagMenuItem(menu, "Open companion note", "file-text", !hasCompanionNote, () => this.openContextFile(context.companionNote, "No companion note found for this file."));
-        this.addBfmAutotagMenuItem(menu, "Open source image", "image", !hasSourceFile, () => this.openContextFile(context.sourceFile, "No source image found for this file."));
-        this.addBfmAutotagMenuItem(menu, "Move selected file", "folder-input", this.isPathProcessing(file.path), () => this.moveAffectedFilesToChosenFolder([file], "selected file", "Context Menu"));
-        this.addBfmAutotagMenuItem(menu, "Delete linked pair", "trash-2", !hasSourceFile || !hasCompanionNote, () => this.deleteLinkedPairFromContext(file), true);
+        this.addAutotagMenuLabel(menu, "QoL", "sliders-horizontal");
+        this.addAutotagMenuItem(menu, "Open companion note", "file-text", !hasCompanionNote, () => this.openContextFile(context.companionNote, "No companion note found for this file."));
+        this.addAutotagMenuItem(menu, "Open source image", "image", !hasSourceFile, () => this.openContextFile(context.sourceFile, "No source image found for this file."));
+        this.addAutotagMenuItem(menu, "Move selected file", "folder-input", this.isPathProcessing(file.path), () => this.moveAffectedFilesToChosenFolder([file], "selected file", "Context Menu"));
+        this.addAutotagMenuItem(menu, "Delete linked pair", "trash-2", !hasSourceFile || !hasCompanionNote, () => this.deleteLinkedPairFromContext(file), true);
     }
 
-    addBfmAutotagFileContextMenu(menu: Menu, file: TFile): void {
+    addAutotagFileContextMenu(menu: Menu, file: TFile): void {
         menu.addSeparator();
         menu.addItem(item => {
             item
-                .setTitle("Maru\'s Autotag")
+                .setTitle("Autotag")
                 .setIcon("sparkles");
             const menuItem = item as unknown as {
                 setSubmenu?: (submenu?: Menu) => Menu | void;
@@ -1963,7 +2593,7 @@ export default class BfmAutotagPlugin extends Plugin {
                 try {
                     const nativeSubmenu = menuItem.setSubmenu();
                     if (nativeSubmenu instanceof Menu) {
-                        this.populateBfmAutotagFileSubmenu(nativeSubmenu, file);
+                        this.populateAutotagFileSubmenu(nativeSubmenu, file);
                         return;
                     }
                 } catch (_) {
@@ -1972,7 +2602,7 @@ export default class BfmAutotagPlugin extends Plugin {
                 try {
                     const submenu = new Menu();
                     submenu.setUseNativeMenu(false);
-                    this.populateBfmAutotagFileSubmenu(submenu, file);
+                    this.populateAutotagFileSubmenu(submenu, file);
                     menuItem.setSubmenu(submenu);
                     return;
                 } catch (_) {
@@ -1982,7 +2612,7 @@ export default class BfmAutotagPlugin extends Plugin {
             item.onClick(event => {
                 const submenu = new Menu();
                 submenu.setUseNativeMenu(false);
-                this.populateBfmAutotagFileSubmenu(submenu, file);
+                this.populateAutotagFileSubmenu(submenu, file);
                 submenu.showAtMouseEvent(event as MouseEvent);
             });
         });
@@ -2007,45 +2637,66 @@ export default class BfmAutotagPlugin extends Plugin {
         return this.app.metadataCache.getFirstLinkpathDest(fallbackLinkPath, info.file?.path ?? "") ?? null;
     }
 
-    suppressDeletedPath(path: string, runId: string | null = this.currentRunIds.get(path) ?? null): void {
+    hasPathInSet(set: Set<string>, path: string): boolean {
+        if (set.has(path)) return true;
+        const pathKey = this.getVaultPathKey(path);
+        for (const existingPath of set.values()) {
+            if (this.getVaultPathKey(existingPath) === pathKey) return true;
+        }
+        return false;
+    }
+
+    deletePathFromSet(set: Set<string>, path: string): boolean {
+        let deleted = set.delete(path);
+        const pathKey = this.getVaultPathKey(path);
+        for (const existingPath of Array.from(set.values())) {
+            if (this.getVaultPathKey(existingPath) === pathKey) {
+                set.delete(existingPath);
+                deleted = true;
+            }
+        }
+        return deleted;
+    }
+
+    suppressDeletedPath(path: string, runId: string | null = this.getPathKeyValue(this.currentRunIds, path) ?? null): void {
         this.deletionSuppressedPaths.add(path);
         this.deletionSuppressedRunIds.set(path, runId);
     }
 
     isDeletionSuppressed(path: string, runId?: string): boolean {
-        if (!this.deletionSuppressedPaths.has(path)) return false;
+        if (!this.hasPathInSet(this.deletionSuppressedPaths, path)) return false;
         if (!runId) return true;
-        const suppressedRunId = this.deletionSuppressedRunIds.get(path);
+        const suppressedRunId = this.getPathKeyValue(this.deletionSuppressedRunIds, path);
         return !suppressedRunId || suppressedRunId === runId;
     }
 
     clearDeletionSuppression(path: string): void {
-        this.deletionSuppressedPaths.delete(path);
-        this.deletionSuppressedRunIds.delete(path);
+        this.deletePathFromSet(this.deletionSuppressedPaths, path);
+        this.deletePathKey(this.deletionSuppressedRunIds, path);
     }
 
     suppressDeletedPair(file: TFile, linkedFile: TFile | null): void {
         const activePair = this.getActiveRunPairForPath(file.path) ?? (linkedFile instanceof TFile ? this.getActiveRunPairForPath(linkedFile.path) : null);
-        const runId = activePair?.runId ?? this.currentRunIds.get(file.path) ?? null;
+        const runId = activePair?.runId ?? this.getPathKeyValue(this.currentRunIds, file.path) ?? null;
         this.suppressDeletedPath(file.path, runId);
         if (linkedFile instanceof TFile) this.suppressDeletedPath(linkedFile.path, runId);
     }
 
 
     async deleteLinkedCompanionOrSource(file: TFile, linkedFile: TFile | null = this.getLinkedFileForDeletion(file)): Promise<void> {
-        if (this.deletionCascadePaths.has(file.path)) return;
+        if (this.hasPathInSet(this.deletionCascadePaths, file.path)) return;
         if (!(linkedFile instanceof TFile)) return;
         const linkedPath = linkedFile.path;
-        if (!(this.app.vault.getAbstractFileByPath(linkedPath) instanceof TFile)) return;
+        if (!(this.getVaultFileByPathFlexible(linkedPath) instanceof TFile)) return;
 
         this.deletionCascadePaths.add(linkedPath);
         const activePair = this.getActiveRunPairForPath(file.path) ?? this.getActiveRunPairForPath(linkedPath);
         this.suppressDeletedPath(linkedPath, activePair?.runId ?? null);
         try {
             await this.app.vault.delete(linkedFile);
-            new Notice(`Maru\'s Autotag deleted linked file: ${linkedPath}`);
+            new Notice(`Autotag deleted linked file: ${linkedPath}`);
         } finally {
-            window.setTimeout(() => this.deletionCascadePaths.delete(linkedPath), 1000);
+            window.setTimeout(() => this.deletePathFromSet(this.deletionCascadePaths, linkedPath), 1000);
             window.setTimeout(() => this.clearDeletionSuppression(linkedPath), 5000);
         }
     }
@@ -2070,7 +2721,7 @@ export default class BfmAutotagPlugin extends Plugin {
     }
 
     async waitForDuplicateSourceIfActive(filePath: string): Promise<void> {
-        const activeRunId = this.currentRunIds.get(filePath);
+        const activeRunId = this.getPathKeyValue(this.currentRunIds, filePath);
         const completion = this.duplicateProcessingCompletion.get(this.getRunCacheKey(filePath, activeRunId))
             ?? this.duplicateProcessingCompletion.get(filePath);
         if (completion) await completion;
@@ -2115,7 +2766,7 @@ export default class BfmAutotagPlugin extends Plugin {
     }
 
     async getCompanionNoteContent(notePath: string): Promise<string> {
-        const note = this.app.vault.getAbstractFileByPath(notePath);
+        const note = this.getVaultFileByPathFlexible(notePath);
         return note instanceof TFile ? await this.app.vault.read(note) : "";
     }
 
@@ -2184,7 +2835,7 @@ export default class BfmAutotagPlugin extends Plugin {
 
     async refreshCompanionSourceFileLinks(note: TFile, imagePath: string, previousImagePaths: string[] = []): Promise<void> {
         const normalizedImagePath = imagePath.replace(/\\/g, "/");
-        const image = this.app.vault.getAbstractFileByPath(normalizedImagePath);
+        const image = this.getVaultFileByPathFlexible(normalizedImagePath);
         if (!(image instanceof TFile)) return;
 
         const metadata = this.buildFolderMetadata(normalizedImagePath);
@@ -2245,7 +2896,7 @@ export default class BfmAutotagPlugin extends Plugin {
         const parentPath = file.parent?.path ?? "";
         const cleanName = extension ? `${match[1]}.${extension}` : match[1];
         const cleanPath = parentPath ? `${parentPath}/${cleanName}` : cleanName;
-        return cleanPath !== file.path && !(this.app.vault.getAbstractFileByPath(cleanPath) instanceof TFile) ? cleanPath : null;
+        return !this.areVaultPathsSame(cleanPath, file.path) && !(this.getVaultFileByPathFlexible(cleanPath) instanceof TFile) ? cleanPath : null;
     }
 
     async autorenameReplacedDuplicate(file: TFile, note: TFile): Promise<{ file: TFile; note: TFile }> {
@@ -2257,8 +2908,8 @@ export default class BfmAutotagPlugin extends Plugin {
             if (renamedFile instanceof TFile) currentFile = renamedFile;
         }
 
-        const cleanNotePath = this.getBfmNotePath(currentFile);
-        if (currentNote.path !== cleanNotePath && !(this.app.vault.getAbstractFileByPath(cleanNotePath) instanceof TFile)) {
+        const cleanNotePath = this.getCompanionNotePath(currentFile);
+        if (!this.areVaultPathsSame(currentNote.path, cleanNotePath) && !(this.getVaultFileByPathFlexible(cleanNotePath) instanceof TFile)) {
             const renamedNote = await this.renameFileWithoutLinkedCascade(currentNote, cleanNotePath);
             if (renamedNote instanceof TFile) currentNote = renamedNote;
         }
@@ -2269,13 +2920,13 @@ export default class BfmAutotagPlugin extends Plugin {
     async deleteFileWithoutLinkedCascade(file: TFile | null, runId?: string): Promise<void> {
         if (!(file instanceof TFile)) return;
         const filePath = file.path;
-        if (!(this.app.vault.getAbstractFileByPath(filePath) instanceof TFile)) return;
+        if (!(this.getVaultFileByPathFlexible(filePath) instanceof TFile)) return;
         this.deletionCascadePaths.add(filePath);
         this.suppressDeletedPath(filePath, runId);
         try {
             await this.app.vault.delete(file);
         } finally {
-            window.setTimeout(() => this.deletionCascadePaths.delete(filePath), 1000);
+            window.setTimeout(() => this.deletePathFromSet(this.deletionCascadePaths, filePath), 1000);
             window.setTimeout(() => this.clearDeletionSuppression(filePath), 5000);
         }
     }
@@ -2286,9 +2937,9 @@ export default class BfmAutotagPlugin extends Plugin {
         try {
             await this.app.vault.rename(file, newPath);
         } finally {
-            window.setTimeout(() => this.deletionCascadePaths.delete(file.path), 1000);
+            window.setTimeout(() => this.deletePathFromSet(this.deletionCascadePaths, file.path), 1000);
         }
-        const renamed = this.app.vault.getAbstractFileByPath(newPath);
+        const renamed = this.getVaultFileByPathFlexible(newPath);
         return renamed instanceof TFile ? renamed : null;
     }
 
@@ -2305,8 +2956,8 @@ export default class BfmAutotagPlugin extends Plugin {
             await this.deleteFileWithoutLinkedCascade(note, runId);
             await this.deleteFileWithoutLinkedCascade(file, runId);
         } finally {
-            window.setTimeout(() => this.deletionCascadePaths.delete(filePath), 1000);
-            window.setTimeout(() => this.deletionCascadePaths.delete(notePath), 1000);
+            window.setTimeout(() => this.deletePathFromSet(this.deletionCascadePaths, filePath), 1000);
+            window.setTimeout(() => this.deletePathFromSet(this.deletionCascadePaths, notePath), 1000);
         }
         this.cleanupProcessingStateForPath(filePath, runId);
         this.cleanupProcessingStateForPath(notePath);
@@ -2326,8 +2977,8 @@ export default class BfmAutotagPlugin extends Plugin {
         const keptPairId = activePair?.pairId
             ?? this.getPairRecordForImagePath(file.path)?.pairId
             ?? this.getPairRecordForNotePath(note.path)?.pairId;
-        const oldImage = this.app.vault.getAbstractFileByPath(oldImagePath);
-        const oldNote = this.app.vault.getAbstractFileByPath(oldNotePath);
+        const oldImage = this.getVaultFileByPathFlexible(oldImagePath);
+        const oldNote = this.getVaultFileByPathFlexible(oldNotePath);
         await this.deleteFileWithoutLinkedCascade(oldNote instanceof TFile ? oldNote : null);
         await this.deleteFileWithoutLinkedCascade(oldImage instanceof TFile ? oldImage : null);
         this.cleanupProcessingStateForPath(oldImagePath);
@@ -2343,7 +2994,7 @@ export default class BfmAutotagPlugin extends Plugin {
         if (activePair && runId) {
             this.updateActiveRunPair(runId!, {
                 imagePath: kept.file.path,
-                expectedNotePath: this.getBfmNotePath(kept.file),
+                expectedNotePath: this.getCompanionNotePath(kept.file),
                 resolvedNotePath: kept.note.path,
             });
         }
@@ -2368,8 +3019,8 @@ export default class BfmAutotagPlugin extends Plugin {
         const keptPairId = activePair?.pairId
             ?? this.getPairRecordForImagePath(newImagePath)?.pairId
             ?? this.getPairRecordForNotePath(newNotePath)?.pairId;
-        const oldImage = this.app.vault.getAbstractFileByPath(oldImagePath);
-        const oldNote = this.app.vault.getAbstractFileByPath(oldNotePath);
+        const oldImage = this.getVaultFileByPathFlexible(oldImagePath);
+        const oldNote = this.getVaultFileByPathFlexible(oldNotePath);
 
         await this.deleteFileWithoutLinkedCascade(oldNote instanceof TFile ? oldNote : null);
         await this.deleteFileWithoutLinkedCascade(oldImage instanceof TFile ? oldImage : null);
@@ -2494,8 +3145,8 @@ export default class BfmAutotagPlugin extends Plugin {
                     const pendingAction = this.pendingDuplicateActions.get(actionKey);
                     const newImagePath = pendingAction?.newImagePath ?? file.path;
                     const newNotePath = pendingAction?.newNotePath ?? note.path;
-                    const currentFile = this.app.vault.getAbstractFileByPath(newImagePath);
-                    const currentNote = this.app.vault.getAbstractFileByPath(newNotePath);
+                    const currentFile = this.getVaultFileByPathFlexible(newImagePath);
+                    const currentNote = this.getVaultFileByPathFlexible(newNotePath);
 
                     if (decision.action === "process") {
                         return;
@@ -2521,7 +3172,7 @@ export default class BfmAutotagPlugin extends Plugin {
                     }
                 })
                 .catch(error => {
-                    console.error("Maru\'s Autotag duplicate decision failed after processing", error);
+                    console.error("Autotag duplicate decision failed after processing", error);
                     new Notice("Duplicate action failed after processing. Check the developer console.");
                 })
                 .finally(async () => {
@@ -2561,7 +3212,7 @@ export default class BfmAutotagPlugin extends Plugin {
     async prepareDuplicateHandling(file: TFile, runId?: string): Promise<DuplicateHandlingResult> {
         if (!this.isDuplicateProtectionActive()) return { match: null, exactHash: "", visualHash: undefined, action: null, migrateLinks: false, autorename: false };
 
-        let notePath = this.getBfmNotePath(file);
+        let notePath = this.getCompanionNotePath(file);
         const previousClaim = this.duplicateClaimLock;
         let releaseClaim: () => void = () => undefined;
         this.duplicateClaimLock = new Promise<void>(resolve => { releaseClaim = resolve; });
@@ -2576,7 +3227,7 @@ export default class BfmAutotagPlugin extends Plugin {
             if (runId && !this.isCurrentRun(file.path, runId)) {
                 return { match: null, exactHash: fingerprint.exactHash, visualHash: fingerprint.visualHash, action: null, migrateLinks: false, autorename: false };
             }
-            notePath = this.getBfmNotePath(file);
+            notePath = this.getCompanionNotePath(file);
             exactHash = fingerprint.exactHash;
             visualHash = fingerprint.visualHash;
             match = this.findDuplicateMatch(file.path, exactHash, visualHash);
@@ -2614,7 +3265,7 @@ export default class BfmAutotagPlugin extends Plugin {
             });
 
             if (this.shouldContinueProcessingDuringDuplicateDecision()) {
-                console.log("Maru\'s Autotag duplicate detected; continuing processing while decision popup is open.", {
+                console.log("Autotag duplicate detected; continuing processing while decision popup is open.", {
                     file: file.path,
                     match: duplicateMatch.record.filePath,
                     matchType: duplicateMatch.type,
@@ -2678,6 +3329,121 @@ export default class BfmAutotagPlugin extends Plugin {
         }
 
         return values;
+    }
+
+    normalizeFolderPropertyValueForMatching(value: string): string {
+        let normalized = value
+            .trim()
+            .replace(/^-\s*/, "")
+            .replace(/^"+|"+$/g, "")
+            .replace(/^\'+|\'+$/g, "")
+            .trim();
+        const wikiMatch = normalized.match(/^!?\[\[([^\]|]+)(?:\|([^\]]+))?\]\]$/);
+        if (wikiMatch) {
+            const target = (wikiMatch[2] || wikiMatch[1]).trim();
+            normalized = target.split("/").pop()?.replace(/\.md$/i, "").trim() || target;
+        }
+        return normalized;
+    }
+
+    extractFolderPropertyValuesFromRawValue(rawValue: unknown): string[] {
+        const rawValues: string[] = [];
+        const collect = (value: unknown) => {
+            if (Array.isArray(value)) {
+                value.forEach(collect);
+                return;
+            }
+            if (typeof value === "string") {
+                value
+                    .split(",")
+                    .map(part => part.trim())
+                    .filter(Boolean)
+                    .forEach(part => rawValues.push(part));
+                return;
+            }
+            if (typeof value === "number" && Number.isFinite(value)) {
+                rawValues.push(String(value));
+            }
+        };
+
+        collect(rawValue);
+        return rawValues
+            .map(value => this.normalizeFolderPropertyValueForMatching(value))
+            .filter(Boolean);
+    }
+
+    getFrontmatterPropertyValuesForFolderMapping(frontmatter: Record<string, unknown>, property: string): string[] {
+        const normalizedProperty = property.trim().toLowerCase();
+        if (!normalizedProperty) return [];
+
+        const values: string[] = [];
+        Object.keys(frontmatter).forEach(key => {
+            if (key.trim().toLowerCase() !== normalizedProperty) return;
+            values.push(...this.extractFolderPropertyValuesFromRawValue(frontmatter[key]));
+        });
+
+        return values;
+    }
+
+    uniqueFolderMappingValues(values: string[]): string[] {
+        const seen = new Set<string>();
+        const output: string[] = [];
+        values.forEach(value => {
+            const normalized = this.normalizeFolderPropertyValueForMatching(value);
+            const key = normalized.toLowerCase();
+            if (!normalized || seen.has(key)) return;
+            seen.add(key);
+            output.push(normalized);
+        });
+        return output.sort((a, b) => a.localeCompare(b));
+    }
+
+    getAutomaticFolderPropertyValues(property: string): string[] {
+        const values: string[] = [];
+        this.app.vault.getMarkdownFiles().forEach(file => {
+            const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter as Record<string, unknown> | undefined;
+            if (!frontmatter) return;
+            values.push(...this.getFrontmatterPropertyValuesForFolderMapping(frontmatter, property));
+        });
+        return this.uniqueFolderMappingValues(values);
+    }
+
+    syncAutomaticFolderPropertyMapping(mapping: FolderPropertyMapping, replaceValues = true): boolean {
+        if (mapping.valueSource !== "automatic") return false;
+        const detectedValues = this.getAutomaticFolderPropertyValues(mapping.property);
+        const nextValues = replaceValues
+            ? detectedValues
+            : this.uniqueFolderMappingValues([...mapping.values, ...detectedValues]);
+        if (nextValues.join("\n") === mapping.values.join("\n")) return false;
+        mapping.values = nextValues;
+        return true;
+    }
+
+    async syncAutomaticFolderPropertyMappings(replaceValues = true): Promise<void> {
+        let changed = false;
+        this.settings.folderPropertyMappings.forEach(mapping => {
+            if (this.syncAutomaticFolderPropertyMapping(mapping, replaceValues)) changed = true;
+        });
+        if (changed) {
+            await this.saveSettings();
+            this.settingTab?.refreshFolderPropertyValuesIfVisible();
+        }
+    }
+
+    scheduleAutomaticFolderPropertySync(delayMs = 600): void {
+        if (this.automaticFolderPropertySyncTimer !== null) {
+            window.clearTimeout(this.automaticFolderPropertySyncTimer);
+        }
+        this.automaticFolderPropertySyncTimer = window.setTimeout(() => {
+            this.automaticFolderPropertySyncTimer = null;
+            void this.syncAutomaticFolderPropertyMappings(true);
+        }, delayMs);
+    }
+
+    async syncAutomaticFolderPropertyMappingsFromFile(file: TFile): Promise<void> {
+        if (file.extension !== "md") return;
+        if (!this.settings.folderPropertyMappings.some(mapping => mapping.valueSource === "automatic")) return;
+        this.scheduleAutomaticFolderPropertySync();
     }
 
     getVaultAwarenessCandidateProperties(): string[] {
@@ -2790,8 +3556,69 @@ export default class BfmAutotagPlugin extends Plugin {
         });
     }
 
+    hasVaultVocabularySources(): boolean {
+        return this.settings.vaultAwarenessEnabled
+            && this.getVaultAwarenessCandidateProperties().length > 0;
+    }
+
+    clearVaultVocabularyCache(): void {
+        this.vocabularyByFile.clear();
+        this.vaultVocabulary.clear();
+        this.vaultAliasToCanonical.clear();
+    }
+
+    scheduleVaultVocabularyCacheBuild(delayMs = 1000): void {
+        if (this.vaultVocabularyBuildTimer !== null) {
+            window.clearTimeout(this.vaultVocabularyBuildTimer);
+            this.vaultVocabularyBuildTimer = null;
+        }
+        const generation = ++this.vaultVocabularyBuildGeneration;
+
+        if (!this.hasVaultVocabularySources()) {
+            this.clearVaultVocabularyCache();
+            return;
+        }
+
+        this.vaultVocabularyBuildTimer = window.setTimeout(() => {
+            this.vaultVocabularyBuildTimer = null;
+            void this.buildVaultVocabularyCacheInChunks(generation);
+        }, delayMs);
+    }
+
+    async buildVaultVocabularyCacheInChunks(generation: number): Promise<void> {
+        if (!this.hasVaultVocabularySources()) {
+            this.clearVaultVocabularyCache();
+            return;
+        }
+
+        const nextByFile = new Map<string, VaultVocabularyRecord[]>();
+        const files = this.app.vault.getMarkdownFiles();
+
+        for (let index = 0; index < files.length; index += 1) {
+            if (generation !== this.vaultVocabularyBuildGeneration) return;
+
+            const file = files[index];
+            const records = this.getVocabularyRecordsForFile(file);
+            if (records.length > 0) {
+                nextByFile.set(file.path, records);
+            }
+
+            if ((index + 1) % 100 === 0) {
+                await this.sleep(0);
+            }
+        }
+
+        if (generation !== this.vaultVocabularyBuildGeneration) return;
+        this.vocabularyByFile = nextByFile;
+        this.rebuildVaultVocabularyAggregate();
+    }
+
     indexVocabularyFile(file: TFile): void {
         if (file.extension !== "md") return;
+        if (!this.hasVaultVocabularySources()) {
+            this.clearVaultVocabularyCache();
+            return;
+        }
 
         const records = this.getVocabularyRecordsForFile(file);
         if (records.length > 0) {
@@ -2810,6 +3637,11 @@ export default class BfmAutotagPlugin extends Plugin {
     }
 
     buildVaultVocabularyCache(): void {
+        if (!this.hasVaultVocabularySources()) {
+            this.clearVaultVocabularyCache();
+            return;
+        }
+
         this.vocabularyByFile.clear();
 
         this.app.vault.getMarkdownFiles().forEach(file => {
@@ -2909,6 +3741,259 @@ export default class BfmAutotagPlugin extends Plugin {
         return aliases.length > 0 ? `${term} (aliases: ${aliases.join(", ")})` : term;
     }
 
+    normalizeLearnedRelationPhrase(value: string): string {
+        return (value.toLowerCase().match(/[a-z0-9]+/g) ?? []).join(" ");
+    }
+
+    hasLearnedRelationEvidence(evidence: string, evidenceText: string): boolean {
+        const normalizedEvidence = this.normalizeLearnedRelationPhrase(evidence);
+        const normalizedText = this.normalizeLearnedRelationPhrase(evidenceText);
+        return normalizedEvidence.length > 0
+            && normalizedText.length > 0
+            && ` ${normalizedText} `.includes(` ${normalizedEvidence} `);
+    }
+
+    getLearnedRelationEditDistance(left: string, right: string): number {
+        const previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+        for (let leftIndex = 1; leftIndex <= left.length; leftIndex++) {
+            const current = [leftIndex];
+            for (let rightIndex = 1; rightIndex <= right.length; rightIndex++) {
+                current[rightIndex] = Math.min(
+                    current[rightIndex - 1] + 1,
+                    previous[rightIndex] + 1,
+                    previous[rightIndex - 1] + (left[leftIndex - 1] === right[rightIndex - 1] ? 0 : 1)
+                );
+            }
+            previous.splice(0, previous.length, ...current);
+        }
+        return previous[right.length];
+    }
+
+    isLearnedVaultRelationStructurallyPlausible(evidence: string, candidate: string, relationType: string): boolean {
+        const evidenceWords = evidence.toLowerCase().match(/[a-z0-9]+/g) ?? [];
+        const candidateWords = candidate.toLowerCase().match(/[a-z0-9]+/g) ?? [];
+        const evidenceCompact = evidenceWords.join("");
+        const candidateCompact = candidateWords.join("");
+        if (!evidenceCompact || !candidateCompact || evidenceCompact === candidateCompact) return false;
+
+        if (relationType === "synonym" || relationType === "broader-narrower") return true;
+        if (relationType === "compound") {
+            const shorter = evidenceCompact.length <= candidateCompact.length ? evidenceCompact : candidateCompact;
+            const longer = evidenceCompact.length > candidateCompact.length ? evidenceCompact : candidateCompact;
+            return shorter.length >= 4 && longer.includes(shorter);
+        }
+        if (relationType === "acronym") {
+            const evidenceInitials = evidenceWords.map(word => word[0]).join("");
+            const candidateInitials = candidateWords.map(word => word[0]).join("");
+            return (evidenceCompact.length >= 2 && evidenceCompact === candidateInitials)
+                || (candidateCompact.length >= 2 && candidateCompact === evidenceInitials);
+        }
+        if (relationType === "spelling") {
+            const longestLength = Math.max(evidenceCompact.length, candidateCompact.length);
+            const allowedDistance = Math.max(1, Math.min(3, Math.floor(longestLength * 0.25)));
+            return this.getLearnedRelationEditDistance(evidenceCompact, candidateCompact) <= allowedDistance;
+        }
+        if (relationType === "word-family") {
+            const shorter = evidenceCompact.length <= candidateCompact.length ? evidenceCompact : candidateCompact;
+            const longer = evidenceCompact.length > candidateCompact.length ? evidenceCompact : candidateCompact;
+            if (shorter.length < 3) return false;
+            let sharedPrefixLength = 0;
+            while (sharedPrefixLength < shorter.length && shorter[sharedPrefixLength] === longer[sharedPrefixLength]) {
+                sharedPrefixLength++;
+            }
+            const requiredPrefixLength = Math.max(3, Math.ceil(shorter.length * 0.65));
+            const maximumLengthDifference = Math.max(3, Math.ceil(shorter.length * 0.5));
+            return sharedPrefixLength >= requiredPrefixLength
+                && longer.length - shorter.length <= maximumLengthDifference;
+        }
+        return false;
+    }
+
+    isLearnedVaultRelationReusable(relation: LearnedVaultRelation): boolean {
+        if (!this.isLearnedVaultRelationStructurallyPlausible(relation.evidence, relation.candidate, relation.relationType)) return false;
+        return (relation.relationType !== "synonym" && relation.relationType !== "broader-narrower")
+            || relation.confirmations >= 2;
+    }
+
+    getLearnedVaultSelections(allowedTerms: string[], evidenceText: string): string[] {
+        const allowed = new Map(allowedTerms.map(term => [term.toLowerCase(), term]));
+        const selections = new Map<string, string>();
+        const now = Date.now();
+
+        this.settings.learnedVaultRelations.forEach(relation => {
+            const candidate = allowed.get(relation.candidate.toLowerCase());
+            if (!candidate
+                || !this.isLearnedVaultRelationReusable(relation)
+                || !this.hasLearnedRelationEvidence(relation.evidence, evidenceText)) return;
+            selections.set(candidate.toLowerCase(), candidate);
+            relation.lastUsedAt = now;
+        });
+
+        return Array.from(selections.values());
+    }
+
+    parseLearnedVaultRelations(content: string): { evidence: string; candidate: string; relationType: string }[] {
+        const cleaned = this.stripThinkBlocks(content)
+            .replace(/^```(?:json)?\s*/i, "")
+            .replace(/\s*```$/i, "")
+            .trim();
+        try {
+            const jsonStart = cleaned.indexOf("{");
+            const jsonEnd = cleaned.lastIndexOf("}");
+            if (jsonStart === -1 || jsonEnd === -1) return [];
+            const parsed = JSON.parse(cleaned.slice(jsonStart, jsonEnd + 1));
+            if (!Array.isArray(parsed?.relations)) return [];
+            return parsed.relations
+                .filter((relation: unknown) => relation && typeof relation === "object")
+                .map((relation: { evidence?: unknown; candidate?: unknown; type?: unknown }) => ({
+                    evidence: typeof relation.evidence === "string" ? this.normalizeAiTagName(relation.evidence).slice(0, 160) : "",
+                    candidate: typeof relation.candidate === "string" ? this.normalizeAiTagName(relation.candidate).slice(0, 160) : "",
+                    relationType: typeof relation.type === "string" && relation.type.trim()
+                        ? relation.type.trim().toLowerCase().replace(/[^a-z0-9-]+/g, "-").slice(0, 40)
+                        : "related",
+                }))
+                .filter((relation: { evidence: string; candidate: string }) => relation.evidence && relation.candidate);
+        } catch {
+            return [];
+        }
+    }
+
+    async rememberLearnedVaultRelations(
+        content: string,
+        acceptedTerms: string[],
+        evidenceText: string,
+        model: string
+    ): Promise<void> {
+        const accepted = new Set(acceptedTerms.map(term => term.toLowerCase()));
+        const proposed = this.parseLearnedVaultRelations(content)
+            .filter(relation => accepted.has(relation.candidate.toLowerCase()))
+            .filter(relation => relation.evidence.toLowerCase() !== relation.candidate.toLowerCase())
+            .filter(relation => this.isLearnedVaultRelationTypeEnabled(relation.relationType))
+            .filter(relation => this.isLearnedVaultRelationStructurallyPlausible(relation.evidence, relation.candidate, relation.relationType))
+            .filter(relation => this.hasLearnedRelationEvidence(relation.evidence, evidenceText));
+        if (proposed.length === 0) return;
+
+        const now = Date.now();
+        proposed.forEach(relation => {
+            const existing = this.settings.learnedVaultRelations.find(entry =>
+                entry.evidence.toLowerCase() === relation.evidence.toLowerCase()
+                && entry.candidate.toLowerCase() === relation.candidate.toLowerCase()
+            );
+            if (existing) {
+                existing.relationType = relation.relationType;
+                existing.model = model;
+                existing.confirmations += 1;
+                existing.lastConfirmedAt = now;
+                existing.lastUsedAt = now;
+                return;
+            }
+            this.settings.learnedVaultRelations.push({
+                ...relation,
+                model,
+                confirmations: 1,
+                createdAt: now,
+                lastConfirmedAt: now,
+                lastUsedAt: now,
+            });
+        });
+        this.settings.learnedVaultRelations = this.settings.learnedVaultRelations
+            .sort((a, b) => Math.max(b.lastUsedAt, b.lastConfirmedAt) - Math.max(a.lastUsedAt, a.lastConfirmedAt))
+            .slice(0, this.settings.learnedVaultRelationCacheLimit);
+        await this.saveSettings();
+    }
+
+    isLearnedVaultRelationTypeEnabled(relationType: string): boolean {
+        const normalized = relationType.toLowerCase();
+        if (normalized === "word-family") return this.settings.vaultLinguisticFeatures.grammaticalVariants !== "exclude";
+        if (normalized === "synonym") return this.settings.vaultLinguisticFeatures.synonyms !== "exclude";
+        if (normalized === "compound") return this.settings.vaultLinguisticFeatures.compoundDecomposition !== "exclude";
+        if (normalized === "spelling") return this.settings.vaultLinguisticFeatures.spellingVariants !== "exclude";
+        if (normalized === "acronym") return this.settings.vaultLinguisticFeatures.acronymsAbbreviations !== "exclude";
+        if (normalized === "broader-narrower") return this.settings.vaultLinguisticFeatures.broaderNarrower === "use";
+        return false;
+    }
+
+    async discoverLearnedVaultRelations(
+        allowedTerms: string[],
+        aiDescription: string,
+        evidenceTags: string[],
+        filenameCandidates: string[],
+        geolocationContextText: string,
+        endpoint: string,
+        model: string
+    ): Promise<{ rawText: string; terms: string[] }> {
+        if (allowedTerms.length === 0) return { rawText: "", terms: [] };
+        const evidenceText = `${aiDescription} ${evidenceTags.join(" ")} ${filenameCandidates.join(" ")} ${geolocationContextText}`;
+        const allowed = new Map(allowedTerms.map(term => [term.toLowerCase(), term]));
+        const messages = [
+            {
+                role: "system",
+                content: [
+                    "You identify reusable direct wording relationships between supplied evidence and allowed Vault Awareness candidates.",
+                    'Respond with JSON only in this exact shape: {"relations":[{"candidate":"exact allowed candidate","evidence":"exact evidence text","type":"word-family"}]}.',
+                    "This is a strict linguistic evidence check, not general image tagging.",
+                    "The candidate must express the same concept as the evidence through one direct relationship.",
+                    "Copy the shortest supporting word or phrase exactly from the evidence. Return only exact allowed candidate names.",
+                    "The only permitted types are word-family, synonym, compound, spelling, acronym, and broader-narrower.",
+                    "Use word-family only when the spellings visibly share the same lexical root. Never label merely related concepts as a word family.",
+                    ...this.getLinguisticPromptInstructions(this.settings.vaultLinguisticFeatures),
+                    "Cloud and Cloudy are a word-family relationship. Population and Overpopulation are a compound relationship.",
+                    "Do not accept topical association or common co-occurrence. Rain and Storm are not automatically the same concept. Art and Architecture are not the same word family.",
+                    "Return an empty relations array when no direct relationship is clearly supported.",
+                ].join(" "),
+            },
+            {
+                role: "user",
+                content: [
+                    `Allowed Vault Awareness candidates: ${allowedTerms.join(", ")}`,
+                    `Generated evidence tags: ${evidenceTags.length > 0 ? evidenceTags.join(", ") : "none"}`,
+                    "Image description:",
+                    aiDescription.trim() || "none",
+                    `Filename evidence: ${filenameCandidates.length > 0 ? filenameCandidates.join(", ") : "none"}`,
+                    geolocationContextText.trim() ? `Known geolocation evidence: ${geolocationContextText.trim()}` : "",
+                    "Return only direct, reusable wording relationships whose evidence text appears above.",
+                ].filter(line => line !== "").join("\n"),
+            },
+        ];
+
+        for (const requestBody of this.buildOllamaTagRequestVariants(model, messages)) {
+            try {
+                const response = await requestUrl({
+                    url: endpoint,
+                    method: "POST",
+                    throw: false,
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(requestBody),
+                });
+                if (response.status < 200 || response.status >= 300) continue;
+                const rawText = this.extractOllamaMessageText(response.json);
+                console.log("Autotag learned relationship discovery raw response:", rawText);
+                const terms = new Map<string, string>();
+                this.parseLearnedVaultRelations(rawText).forEach(relation => {
+                    const candidate = allowed.get(relation.candidate.toLowerCase());
+                    if (!candidate
+                        || !this.isLearnedVaultRelationTypeEnabled(relation.relationType)
+                        || !this.isLearnedVaultRelationStructurallyPlausible(relation.evidence, candidate, relation.relationType)
+                        || !this.hasLearnedRelationEvidence(relation.evidence, evidenceText)) return;
+                    terms.set(candidate.toLowerCase(), candidate);
+                });
+                if (terms.size > 0) {
+                    return {
+                        rawText,
+                        terms: Array.from(terms.values()).slice(0, this.settings.maxVaultAwareAdditions),
+                    };
+                }
+                if (/"relations"\s*:\s*\[\s*\]/i.test(rawText)) break;
+            } catch (error) {
+                console.warn("Autotag learned relationship discovery attempt threw", {
+                    model,
+                    error: error instanceof Error ? error.message : String(error),
+                });
+            }
+        }
+        return { rawText: "", terms: [] };
+    }
+
     isConceptSupportedLocally(
         term: string,
         evidenceText: string,
@@ -2944,10 +4029,14 @@ export default class BfmAutotagPlugin extends Plugin {
         return false;
     }
 
+    getCombinedBridgeRuleText(): string {
+        return typeof this.settings.bridgeRules === "string" ? this.settings.bridgeRules : "";
+    }
+
     parseManualEnrichmentRules(): Map<string, string[]> {
         const rules = new Map<string, string[]>();
 
-        this.settings.manualEnrichmentRules
+        this.getCombinedBridgeRuleText()
             .split(/\r?\n/)
             .map(line => line.trim())
             .filter(line => line && !line.startsWith("#"))
@@ -2955,18 +4044,24 @@ export default class BfmAutotagPlugin extends Plugin {
                 const separator = line.includes("=>") ? "=>" : line.includes(":") ? ":" : "";
                 if (!separator) return;
 
-                const [source, targets] = line.split(separator);
-                const sourceName = this.normalizeAiTagName(source);
-                if (!sourceName || !targets) return;
+                const [sourceText, targets] = line.split(separator);
+                if (!targets) return;
 
                 const targetNames = targets
                     .split(",")
                     .map(target => this.normalizeAiTagName(target))
                     .filter(Boolean);
 
-                if (targetNames.length > 0) {
-                    rules.set(sourceName.toLowerCase(), targetNames);
-                }
+                if (targetNames.length === 0) return;
+
+                sourceText
+                    .split(",")
+                    .map(source => this.normalizeAiTagName(source))
+                    .filter(Boolean)
+                    .forEach(sourceName => {
+                        const key = sourceName.toLowerCase();
+                        rules.set(key, this.normalizeUniqueAiTags([...(rules.get(key) ?? []), ...targetNames]));
+                    });
             });
 
         return rules;
@@ -2974,7 +4069,7 @@ export default class BfmAutotagPlugin extends Plugin {
 
 
     parseManualSubjectBridgeRules(): { sources: string[]; targets: string[] }[] {
-        return this.settings.manualSubjectBridgeRules
+        return this.getCombinedBridgeRuleText()
             .split(/\r?\n/)
             .map(line => line.trim())
             .filter(line => line && !line.startsWith("#"))
@@ -3004,8 +4099,75 @@ export default class BfmAutotagPlugin extends Plugin {
     }
 
 
+    isValidCandidateMode(value: unknown): value is CandidateMode {
+        return value === "disabled" || value === "consider" || value === "all" || value === "exclude";
+    }
+
+    normalizeCandidateMode(value: unknown, fallback: CandidateMode = "disabled"): CandidateMode {
+        return this.isValidCandidateMode(value) ? value : fallback;
+    }
+
     isCandidateSourceActive(mode: CandidateMode): boolean {
         return mode === "consider" || mode === "all";
+    }
+
+    isCandidateSourceConfigured(mode: CandidateMode): boolean {
+        return mode !== "disabled";
+    }
+
+    getFolderMappingAiCandidateMode(mapping: FolderPropertyMapping): CandidateMode {
+        return this.normalizeCandidateMode(
+            mapping.aiCandidateMode,
+            mapping.useAsAiCandidate === false ? "disabled" : "all"
+        );
+    }
+
+    getFolderFallbackAiCandidateMode(): CandidateMode {
+        return this.normalizeCandidateMode(
+            this.settings.folderFallbackAiCandidateMode,
+            this.settings.folderFallbackUseAsAiCandidate === false ? "disabled" : DEFAULT_SETTINGS.folderFallbackAiCandidateMode
+        );
+    }
+
+    hasConfiguredFolderAiCandidateSource(): boolean {
+        if (!this.settings.useFolderTags) return false;
+        return this.getFolderPropertyMappings().some(mapping => this.isCandidateSourceConfigured(this.getFolderMappingAiCandidateMode(mapping)))
+            || this.isCandidateSourceConfigured(this.getFolderFallbackAiCandidateMode());
+    }
+
+    hasActiveFolderAiCandidateSource(): boolean {
+        if (!this.settings.useFolderTags) return false;
+        return this.getFolderPropertyMappings().some(mapping => this.isCandidateSourceActive(this.getFolderMappingAiCandidateMode(mapping)))
+            || this.isCandidateSourceActive(this.getFolderFallbackAiCandidateMode());
+    }
+
+    isBridgeAiInputUsable(): boolean {
+        return this.settings.bridgeUseAiInput && this.settings.aiTaggingEnabled;
+    }
+
+    isBridgeFilenameInputUsable(): boolean {
+        return this.settings.bridgeUseFilenameInput && this.isCandidateSourceActive(this.settings.filenameCandidateMode);
+    }
+
+    isBridgeFolderInputUsable(): boolean {
+        return this.settings.bridgeUseFolderInput && this.hasActiveFolderAiCandidateSource();
+    }
+
+    isBridgeGeolocationInputUsable(): boolean {
+        return this.settings.bridgeUseGeolocationInput && this.settings.geolocationEnabled;
+    }
+
+    hasUsableBridgeInput(): boolean {
+        return this.isBridgeAiInputUsable()
+            || this.isBridgeFilenameInputUsable()
+            || this.isBridgeFolderInputUsable()
+            || this.isBridgeGeolocationInputUsable();
+    }
+
+    canRunDirectBridgeOutput(): boolean {
+        return this.settings.manualEnrichmentEnabled
+            && this.hasUsableBridgeInput()
+            && this.getCombinedBridgeRuleText().trim().length > 0;
     }
 
     getFolderTagCandidates(folderCandidateValues: string[]): string[] {
@@ -3023,6 +4185,89 @@ export default class BfmAutotagPlugin extends Plugin {
         folderCandidateValues.forEach(add);
         return candidates;
     }
+
+    getFolderCandidatePromptMode(
+        folderStrongCandidates: string[],
+        folderConsiderCandidates: string[],
+        folderExcludedCandidates: string[]
+    ): CandidateMode {
+        if (folderStrongCandidates.length > 0) return "all";
+        if (folderConsiderCandidates.length > 0) return "consider";
+        if (folderExcludedCandidates.length > 0) return "exclude";
+        return "disabled";
+    }
+
+    formatFolderCandidatePromptHint(
+        folderStrongCandidates: string[],
+        folderConsiderCandidates: string[],
+        folderExcludedCandidates: string[]
+    ): string {
+        const parts: string[] = [];
+        if (folderStrongCandidates.length > 0) parts.push(`all: ${folderStrongCandidates.join(", ")}`);
+        if (folderConsiderCandidates.length > 0) parts.push(`consider: ${folderConsiderCandidates.join(", ")}`);
+        if (folderExcludedCandidates.length > 0) parts.push(`excluded: ${folderExcludedCandidates.join(", ")}`);
+        return parts.length > 0 ? parts.join("; ") : "none";
+    }
+
+    getFilenameNoiseWords(): Set<string> {
+        return new Set([
+            "ata", "copy", "dcim", "dsc", "dscf", "dscn", "edited", "file", "heic", "heif",
+            "image", "img", "jpeg", "jpg", "mov", "mp4", "mv", "photo", "pict", "png",
+            "pxl", "scan", "screen", "screenrecord", "screenrecording", "screenshot",
+            "snapchat", "telegram", "untitled", "vid", "video", "wa", "webp",
+        ]);
+    }
+
+    isFilenameNoiseWord(word: string): boolean {
+        const key = word.toLowerCase();
+        if (/^\d+$/.test(key)) return true;
+        if (this.getFilenameNoiseWords().has(key)) return true;
+        if (/^[a-f0-9]{8,}$/i.test(key) && /\d/.test(key)) return true;
+        if (/^[a-z]{1,5}\d{3,}$/i.test(key)) return true;
+        return false;
+    }
+
+    getFilenameWords(rawBasename: string, splitAlphaNumeric = false): string[] {
+        const source = splitAlphaNumeric
+            ? rawBasename
+                .replace(/(\p{L})(\p{N}+)/gu, "$1 ")
+                .replace(/(\p{N}+)(\p{L})/gu, " $2")
+            : rawBasename;
+        const basename = source
+            .replace(/([a-z])([A-Z])/g, "$1 $2")
+            .replace(/[^\p{L}\p{N}]+/gu, " ")
+            .trim();
+        if (!basename) return [];
+        return basename.split(/\s+/).map(word => word.trim()).filter(Boolean);
+    }
+
+    getHumanReadableFilenameWords(rawBasename: string, words: string[]): string[] {
+        const compactName = rawBasename.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, "");
+        if (/^[a-f0-9]{12,}$/i.test(compactName) && /\d/.test(compactName)) {
+            return [];
+        }
+
+        return words.filter(word => !this.isFilenameNoiseWord(word));
+    }
+
+    getFilenameAiTagExclusionTerms(file: TFile | null): Set<string> {
+        const terms = new Set<string>();
+        if (!this.settings.filenameCandidatesHumanReadableOnly || !file) return terms;
+
+        this.getFilenameWords(file.basename, true)
+            .map(word => this.normalizeAiTagName(word))
+            .filter(word => word && this.isFilenameNoiseWord(word))
+            .forEach(word => terms.add(word.toLowerCase()));
+
+        return terms;
+    }
+
+    filterFilenameNoiseFromAiTags(tags: string[], file: TFile | null): string[] {
+        const excludedTerms = this.getFilenameAiTagExclusionTerms(file);
+        if (excludedTerms.size === 0) return tags;
+        return tags.filter(tag => !excludedTerms.has(this.normalizeAiTagName(tag).toLowerCase()));
+    }
+
     getFilenameKeywordCandidates(file: TFile | null): string[] {
         if (!file || this.settings.filenameCandidateMode === "disabled") {
             return [];
@@ -3034,18 +4279,18 @@ export default class BfmAutotagPlugin extends Plugin {
             "of", "on", "or", "the", "to", "with", "without", "und", "oder", "der", "die", "das",
             "ein", "eine", "einer", "eines", "mit", "von", "zu", "im", "am"
         ]);
-        const basename = file.basename
-            .replace(/([a-z])([A-Z])/g, "$1 $2")
-            .replace(/[^\p{L}\p{N}]+/gu, " ")
-            .trim();
-        const words = basename
-            .split(/\s+/)
+        const humanReadableOnly = this.settings.filenameCandidatesHumanReadableOnly;
+        let words = this.getFilenameWords(file.basename, humanReadableOnly)
             .map(word => word.trim())
-            .filter(word => word.length >= 2)
-            .filter(word => !/^\d+$/.test(word))
-            .filter(word => !stopWords.has(word.toLowerCase()))
+            .filter(word => !humanReadableOnly || word.length >= 2)
+            .filter(word => !humanReadableOnly || !/^\d+$/.test(word))
+            .filter(word => !humanReadableOnly || !stopWords.has(word.toLowerCase()))
             .map(word => this.normalizeAiTagName(word))
             .filter(word => word && !excludedTerms.has(word.toLowerCase()));
+        if (humanReadableOnly) {
+            words = this.getHumanReadableFilenameWords(file.basename, words);
+            if (words.length === 0) return [];
+        }
 
         const candidates: string[] = [];
         const seen = new Set<string>();
@@ -3058,6 +4303,9 @@ export default class BfmAutotagPlugin extends Plugin {
         };
 
         words.forEach(add);
+        if (!humanReadableOnly && words.length > 2) {
+            add(words.join(" "));
+        }
         for (let index = 0; index < words.length - 1; index++) {
             add(`${words[index]} ${words[index + 1]}`);
         }
@@ -3067,20 +4315,24 @@ export default class BfmAutotagPlugin extends Plugin {
     getRankedVaultVocabularyTerms(
         aiDescription: string,
         filenameCandidates: string[] = [],
-        folderTagCandidates: string[] = []
+        folderTagCandidates: string[] = [],
+        geolocationContextText: string = "",
+        folderExcludedCandidates: string[] = [],
+        folderStrongCandidates: string[] = folderTagCandidates
     ): string[] {
         const excluded = new Set<string>();
-        if (this.settings.folderTagsCandidateMode === "exclude") {
-            folderTagCandidates.forEach(value => excluded.add(value.toLowerCase()));
-        }
+        folderExcludedCandidates.forEach(value => excluded.add(value.toLowerCase()));
         if (this.settings.filenameCandidateMode === "exclude") {
             filenameCandidates.forEach(value => excluded.add(value.toLowerCase()));
         }
         const now = Date.now();
         const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
-        const folderText = folderTagCandidates.join(" ");
+        const folderText = folderStrongCandidates.join(" ");
         const filenameText = filenameCandidates.join(" ");
-        const manualRules = this.parseManualEnrichmentRules();
+        const geolocationText = geolocationContextText.trim();
+        const manualRules = this.settings.manualEnrichmentEnabled && this.hasUsableBridgeInput()
+            ? this.parseManualEnrichmentRules()
+            : new Map<string, string[]>();
         const manualTargets = new Set<string>();
         manualRules.forEach(targets => targets.forEach(target => manualTargets.add(target.toLowerCase())));
 
@@ -3096,10 +4348,16 @@ export default class BfmAutotagPlugin extends Plugin {
                     this.getTextMatchScore(name, text, this.settings.vaultLinguisticFeatures.grammaticalVariants === "use", this.settings.vaultLinguisticFeatures.compoundDecomposition === "use")
                 ));
                 const descriptionBonus = bestMatch(aiDescription);
-                const folderBonus = this.settings.folderTagsCandidateMode === "all" ? bestMatch(folderText) : 0;
+                const folderBonus = folderStrongCandidates.length > 0 ? bestMatch(folderText) : 0;
                 const filenameBonus = this.settings.filenameCandidateMode === "all" ? bestMatch(filenameText) : 0;
+                const geolocationBonus = geolocationText ? bestMatch(geolocationText) : 0;
                 const manualBonus = manualTargets.has(entry.name.toLowerCase()) ? 2 : 0;
-                const evidenceScore = descriptionBonus + folderBonus + filenameBonus + manualBonus;
+                const learnedBonus = this.settings.learnedVaultRelations.some(relation =>
+                    this.isLearnedVaultRelationReusable(relation)
+                    && relation.candidate.toLowerCase() === entry.name.toLowerCase()
+                    && this.hasLearnedRelationEvidence(relation.evidence, `${aiDescription} ${filenameText} ${geolocationText}`)
+                ) ? 12 : 0;
+                const evidenceScore = descriptionBonus + folderBonus + filenameBonus + geolocationBonus + manualBonus + learnedBonus;
 
                 return {
                     name: entry.name,
@@ -3134,21 +4392,160 @@ export default class BfmAutotagPlugin extends Plugin {
         return normalizedValues;
     }
 
+    filterUnsupportedCandidateEchoTags(
+        tags: string[],
+        aiDescription: string,
+        folderTagCandidates: string[],
+        geolocationContextText: string = ""
+    ): string[] {
+        const descriptionText = aiDescription.trim();
+        if (!descriptionText) return tags;
+
+        const folderCandidateKeys = new Set(
+            folderTagCandidates
+                .map(candidate => this.normalizeAiTagName(candidate).toLowerCase())
+                .filter(Boolean)
+        );
+        if (folderCandidateKeys.size === 0) return tags;
+
+        const directEvidenceText = [descriptionText, geolocationContextText].filter(Boolean).join(" ");
+        return tags.filter(tag => {
+            const normalized = this.normalizeAiTagName(tag);
+            if (!folderCandidateKeys.has(normalized.toLowerCase())) return true;
+            return this.isConceptSupportedLocally(normalized, directEvidenceText, this.settings.vaultLinguisticFeatures);
+        });
+    }
+
+    getFolderAiTagExclusionTerms(folderGeneratedValues: string[]): Set<string> {
+        const terms = new Set<string>();
+        if (!this.settings.removeFolderTagsFromAiTags) return terms;
+
+        folderGeneratedValues.forEach(value => {
+            const normalized = this.normalizeAiTagName(value);
+            if (normalized) terms.add(normalized.toLowerCase());
+        });
+
+        return terms;
+    }
+
+    filterFolderTermsFromAiTags(tags: string[], folderGeneratedValues: string[]): string[] {
+        const excludedTerms = this.getFolderAiTagExclusionTerms(folderGeneratedValues);
+        if (excludedTerms.size === 0) return tags;
+        return tags.filter(tag => !excludedTerms.has(this.normalizeAiTagName(tag).toLowerCase()));
+    }
+
+    getGeolocationAiTagExclusionTerms(context: ImageGeolocationContext | null): Set<string> {
+        const terms = new Set<string>();
+        if (!this.settings.removeGeolocationFromAiTags || !context) return terms;
+
+        const add = (value: unknown) => {
+            if (typeof value !== "string") return;
+            const normalized = this.normalizeAiTagName(value);
+            if (normalized) terms.add(normalized.toLowerCase());
+        };
+        const addCoordinate = (value: unknown) => {
+            if (value === undefined || value === null || value === "") return;
+            const numeric = Number(value);
+            if (!Number.isFinite(numeric)) {
+                add(String(value));
+                return;
+            }
+            add(String(value));
+            for (let decimals = 0; decimals <= 6; decimals += 1) {
+                add(numeric.toFixed(decimals).replace(/\.?0+$/, ""));
+            }
+        };
+
+        [
+            "gps",
+            "gps coordinates",
+            "coordinates",
+            "coordinate",
+            "latitude",
+            "longitude",
+            "altitude",
+            "geo",
+            "geolocation",
+            "location metadata",
+        ].forEach(add);
+        addCoordinate(context.coordinates.latitude);
+        addCoordinate(context.coordinates.longitude);
+        addCoordinate(context.coordinates.altitude);
+
+        ([
+            "latitude",
+            "longitude",
+            "altitude",
+            "country",
+            "region",
+            "county",
+            "city",
+            "suburb",
+            "road",
+            "postcode",
+            "houseNumber",
+            "address",
+            "displayName",
+        ] as GeolocationField[]).forEach(field => {
+            const value = context.locationData[field];
+            add(value);
+            addCoordinate(value);
+            if (field === "address" || field === "displayName") {
+                value
+                    ?.split(/[,;|/]+/)
+                    .map(part => part.trim())
+                    .forEach(part => {
+                        add(part);
+                        add(part.replace(/\b\d+(?:[.,]\d+)?\b/g, "").replace(/\s+/g, " ").trim());
+                    });
+            }
+        });
+
+        return terms;
+    }
+
+    filterGeolocationTermsFromAiTags(tags: string[], context: ImageGeolocationContext | null): string[] {
+        const excludedTerms = this.getGeolocationAiTagExclusionTerms(context);
+        if (excludedTerms.size === 0) return tags;
+        const normalizeLoose = (value: string) => this.normalizeAiTagName(value)
+            .toLowerCase()
+            .replace(/[^\p{L}\p{N}.,+-]+/gu, " ")
+            .replace(/\s+/g, " ")
+            .trim();
+        const geolocationText = context
+            ? ` ${normalizeLoose(this.formatGeolocationContextForDescription(context))} `
+            : "";
+        const excludedLooseTerms = Array.from(excludedTerms)
+            .map(term => normalizeLoose(term))
+            .filter(term => term.length >= 3);
+        const containsWholeLooseTerm = (haystack: string, needle: string) => {
+            const escaped = this.escapeRegex(needle).replace(/\s+/g, "\\s+");
+            return new RegExp(`(^|\\s)${escaped}(\\s|$)`, "i").test(haystack);
+        };
+        return tags.filter(tag => {
+            const normalizedTag = this.normalizeAiTagName(tag).toLowerCase();
+            if (excludedTerms.has(normalizedTag)) return false;
+            const looseTag = normalizeLoose(tag);
+            if (/^[+-]?\d{1,3}(?:[.,]\d{2,})?$/.test(looseTag)) return false;
+            if (looseTag.length >= 3 && geolocationText.includes(` ${looseTag} `)) return false;
+            return !excludedLooseTerms.some(term => containsWholeLooseTerm(looseTag, term));
+        });
+    }
+
     expandAiTagsWithKnownVocabulary(
         aiTags: string[],
         filenameCandidates: string[] = [],
-        folderTagCandidates: string[] = []
+        folderTagCandidates: string[] = [],
+        folderExcludedCandidates: string[] = [],
+        geolocationContextText: string = ""
     ): string[] {
         const excluded = new Set<string>();
-        if (this.settings.folderTagsCandidateMode === "exclude") {
-            folderTagCandidates.forEach(value => excluded.add(value.toLowerCase()));
-        }
+        folderExcludedCandidates.forEach(value => excluded.add(value.toLowerCase()));
         if (this.settings.filenameCandidateMode === "exclude") {
             filenameCandidates.forEach(value => excluded.add(value.toLowerCase()));
         }
         const seen = new Set<string>();
         const expanded: string[] = [];
-        const manualRules = this.parseManualEnrichmentRules();
         const add = (value: string) => {
             const normalized = this.normalizeAiTagName(value);
             const key = normalized.toLowerCase();
@@ -3157,23 +4554,25 @@ export default class BfmAutotagPlugin extends Plugin {
             expanded.push(normalized);
         };
 
-        const expansionSources = [
-            ...aiTags,
-            ...(this.settings.filenameCandidateMode === "all" ? filenameCandidates : []),
-            ...(this.settings.folderTagsCandidateMode === "all" ? folderTagCandidates : []),
-        ];
+        const expansionSources = [...aiTags];
+        const directExpansionEvidenceText = [
+            this.isBridgeAiInputUsable() ? aiTags.join(" ") : "",
+            this.isBridgeFilenameInputUsable() ? filenameCandidates.join(" ") : "",
+            this.isBridgeFolderInputUsable() ? folderTagCandidates.join(" ") : "",
+            this.isBridgeGeolocationInputUsable() ? geolocationContextText : "",
+        ].filter(Boolean).join(" ");
+        if (this.settings.manualEnrichmentEnabled && directExpansionEvidenceText.trim()) {
+            this.parseManualSubjectBridgeRules().forEach(rule => {
+                const matchedSources = rule.sources.filter(source =>
+                    this.isConceptSupportedLocally(source, directExpansionEvidenceText, this.settings.bridgeLinguisticFeatures)
+                );
+                if (matchedSources.length === 0) return;
+                [...matchedSources, ...rule.targets].forEach(term => add(term));
+            });
+        }
+
         expansionSources.forEach(domain => {
             add(domain);
-            const domainKey = this.normalizeAiTagName(domain).toLowerCase();
-
-            manualRules.get(domainKey)?.forEach(target => add(target));
-
-            manualRules.forEach((targets, source) => {
-                if (this.tagContainsKnownVocabularyTerm(domain, source)) {
-                    targets.forEach(target => add(target));
-                }
-            });
-
 
             if (this.settings.vaultLinguisticFeatures.compoundDecomposition === "use") {
                 Array.from(this.vaultVocabulary.values())
@@ -3191,8 +4590,37 @@ export default class BfmAutotagPlugin extends Plugin {
         filenameCandidateHint: string,
         filenameMode: CandidateMode,
         folderTagCandidateHint: string,
-        folderMode: CandidateMode
+        folderMode: CandidateMode,
+        geolocationContextText: string = ""
     ): { role: string; content: string }[] {
+        const hasGeolocationContext = geolocationContextText.trim().length > 0;
+        const geolocationAllowedForAiTags = hasGeolocationContext && !this.settings.removeGeolocationFromAiTags;
+        const humanReadableFilenameGuard = this.settings.filenameCandidatesHumanReadableOnly;
+        const hasExcludedFolderCandidates = folderTagCandidateHint.includes("excluded:");
+        const filenameInstruction = filenameMode === "all"
+            ? humanReadableFilenameGuard
+                ? "Filename keywords are an additional metadata source, but they are not mandatory output. Use them only when they genuinely describe the image or note subject; ignore camera codes, counters, and technical fragments."
+                : "Filename keywords are an allowed metadata source. Human-readable filename cleanup is disabled, so consider provided filename words, codes, counters, timestamps, and technical fragments as-is when they may be useful to the user. Do not reject them only because they are not natural language."
+            : filenameMode === "consider"
+                ? humanReadableFilenameGuard
+                    ? "Filename keywords are cleaned human-readable clues only; use them only when supported by the image description."
+                    : "Filename keywords are clues only. Human-readable filename cleanup is disabled, so assess provided filename fragments exactly as shown, including technical fragments, but still use them only when supported by the image description."
+                : filenameMode === "exclude"
+                    ? "Do not use filename keywords as a source, and do not repeat exact filename keywords in aitags."
+                    : "Ignore filename keywords.";
+        const folderInstruction = [
+            folderMode === "all"
+                ? "Folder tag keywords marked All Keywords are additional classification/context metadata, but they are not mandatory output. Use them only when they genuinely describe the image or note subject; do not copy every folder name into aitags."
+                : folderMode === "consider"
+                    ? "Folder tag keywords marked Consider are clues only; use them only when supported by the image description or filename keywords."
+                    : folderMode === "exclude"
+                        ? "Do not use folder tag keywords as a source, and do not repeat exact current folder-derived keywords in aitags."
+                        : "Ignore folder tag keywords.",
+            hasExcludedFolderCandidates ? "Folder tag keywords marked Excluded must not be returned as aitags, even if other folder keywords are allowed." : "",
+        ].filter(Boolean).join(" ");
+        const filenameGuardDisabledInstruction = !humanReadableFilenameGuard && (filenameMode === "all" || filenameMode === "consider")
+            ? "Do not apply any additional human-readable filtering to filename candidates in this pass."
+            : "";
         return [
             {
                 role: "system",
@@ -3203,11 +4631,17 @@ export default class BfmAutotagPlugin extends Plugin {
                     "Prefer nouns and concepts visible or strongly implied by the description.",
                     "Add useful synonyms when they improve searchability, such as fortress for castle.",
                     "Do not use vault vocabulary yet; this pass creates base tags only.",
-                    filenameMode === "all" ? "Filename keywords are an additional metadata source; use them to generate helpful tags and related broader concepts even when the image description is incomplete." : filenameMode === "consider" ? "Filename keywords are clues only; use them only when supported by the image description." : filenameMode === "exclude" ? "Do not use filename keywords as a source, and do not repeat exact filename keywords in aitags." : "Ignore filename keywords.",
-                    folderMode === "all" ? "Folder tag keywords are an additional metadata source; use them to generate helpful tags and related broader concepts even when the image description is incomplete." : folderMode === "consider" ? "Folder tag keywords are clues only; use them only when supported by the image description or filename keywords." : folderMode === "exclude" ? "Do not use folder tag keywords as a source, and do not repeat exact current folder-derived keywords in aitags." : "Ignore folder tag keywords.",
-                    "Reject candidates that are only common, recent, adjacent, or listed but not supported by the description or an allowed filename/folder source.",
+                    filenameInstruction,
+                    folderInstruction,
+                    geolocationAllowedForAiTags
+                        ? "Known geolocation metadata is a trusted metadata source for location-specific tags. Use it to avoid guessed city, country, landmark, or region claims, and do not invent place names that are not present in that metadata."
+                        : hasGeolocationContext
+                            ? "Known geolocation metadata is available only to prevent location guesses. Do not return city, country, region, landmark, road, address, GPS, coordinate, latitude, or longitude terms in aitags."
+                        : "Do not guess city, country, landmark, or region tags from visual style, architecture, filename, or folder names unless directly supported by the description or an allowed metadata source.",
+                    filenameGuardDisabledInstruction,
+                    "Reject candidates that are only common, recent, adjacent, or listed but not supported by the description or an allowed metadata source.",
                     "Do not include markdown, hashtags, explanations, paths, or duplicate terms.",
-                ].join(" "),
+                ].filter(Boolean).join(" "),
             },
             {
                 role: "user",
@@ -3217,11 +4651,14 @@ export default class BfmAutotagPlugin extends Plugin {
                     "",
                     `Filename keyword candidates (${filenameMode}): ${filenameCandidateHint}`,
                     `Folder tag keyword candidates (${folderMode}): ${folderTagCandidateHint}`,
+                    hasGeolocationContext
+                        ? `${geolocationAllowedForAiTags ? "Known geolocation metadata" : "Known geolocation metadata (do not write as aitags)"}: ${geolocationContextText.trim()}`
+                        : "",
                     "",
-                    filenameMode === "all" || folderMode === "all"
-                        ? 'Return JSON only with terms supported by the image description and/or allowed keyword sources: {"aitags":["term1","term2"]}'
+                    filenameMode === "all" || folderMode === "all" || geolocationAllowedForAiTags
+                        ? 'Return JSON only with terms supported by the image description and/or allowed metadata sources: {"aitags":["term1","term2"]}'
                         : 'Return JSON only with terms supported by the image description: {"aitags":["term1","term2"]}',
-                ].join("\n"),
+                ].filter(line => line !== "").join("\n"),
             },
         ];
     }
@@ -3253,14 +4690,16 @@ export default class BfmAutotagPlugin extends Plugin {
         evidenceDomains: string[],
         aiDescription: string,
         filenameCandidates: string[],
-        folderTagCandidates: string[]
+        folderTagCandidates: string[],
+        geolocationContextText: string = ""
     ): string[] {
         if (!this.settings.bridgeEnabled) return [];
         const evidenceText = [
-            evidenceDomains.join(" "),
-            aiDescription,
-            filenameCandidates.join(" "),
-            folderTagCandidates.join(" "),
+            this.settings.bridgeUseAiInput ? evidenceDomains.join(" ") : "",
+            this.settings.bridgeUseAiInput ? aiDescription : "",
+            this.settings.bridgeUseFilenameInput ? filenameCandidates.join(" ") : "",
+            this.settings.bridgeUseFolderInput ? folderTagCandidates.join(" ") : "",
+            this.settings.bridgeUseGeolocationInput ? geolocationContextText : "",
         ].join(" ");
         const additions = new Map<string, string>();
 
@@ -3269,9 +4708,15 @@ export default class BfmAutotagPlugin extends Plugin {
                 const matchedSources = rule.sources.filter(source =>
                     this.isConceptSupportedLocally(source, evidenceText, this.settings.bridgeLinguisticFeatures)
                 );
-                if (matchedSources.length === 0) return;
+                const matchedTargets = rule.targets.filter(target =>
+                    this.isConceptSupportedLocally(target, evidenceText, this.settings.bridgeLinguisticFeatures)
+                );
+                if (matchedSources.length === 0 && matchedTargets.length === 0) return;
 
-                [...matchedSources, ...rule.targets].forEach(term => {
+                const supportedTerms = matchedSources.length > 0
+                    ? [...matchedSources, ...rule.targets]
+                    : matchedTargets;
+                supportedTerms.forEach(term => {
                     const canonical = this.canonicalizeVaultTerm(term, this.settings.bridgeLinguisticFeatures.canonicalization === "use");
                     additions.set(canonical.toLowerCase(), canonical);
                 });
@@ -3285,15 +4730,22 @@ export default class BfmAutotagPlugin extends Plugin {
         aiDescription: string,
         filenameCandidates: string[],
         folderTagCandidates: string[],
+        geolocationContextText: string,
         endpoint: string,
         model: string
     ): Promise<string[]> {
         if (!this.settings.bridgeEnabled) return [];
+        const bridgeBaseTags = this.settings.bridgeUseAiInput ? baseTags : [];
+        const bridgeDescription = this.settings.bridgeUseAiInput ? aiDescription : "";
+        const bridgeFilenameCandidates = this.settings.bridgeUseFilenameInput ? filenameCandidates : [];
+        const bridgeFolderTagCandidates = this.settings.bridgeUseFolderInput ? folderTagCandidates : [];
+        const bridgeGeolocationContextText = this.settings.bridgeUseGeolocationInput ? geolocationContextText : "";
         const evidenceText = [
-            baseTags.join(" "),
-            aiDescription,
-            filenameCandidates.join(" "),
-            folderTagCandidates.join(" "),
+            bridgeBaseTags.join(" "),
+            bridgeDescription,
+            bridgeFilenameCandidates.join(" "),
+            bridgeFolderTagCandidates.join(" "),
+            bridgeGeolocationContextText,
         ].join(" ");
         const rules = this.parseManualSubjectBridgeRules();
         const allSources = new Map<string, string>();
@@ -3332,7 +4784,18 @@ export default class BfmAutotagPlugin extends Plugin {
                         'Respond with JSON only in this exact shape: {"aitags":["source"]}.',
                         "Return only exact configured source names from the supplied list.",
                         "Assess every supplied source independently against all supplied evidence.",
-                        "A source does not need to appear in Generated tags; the image description, filename keywords, and folder keywords are equally valid evidence.",
+                        this.settings.bridgeUseAiInput
+                            ? "Generated tags and the image description are valid evidence."
+                            : "Do not use generated tags or the image description as evidence.",
+                        this.settings.bridgeUseFilenameInput
+                            ? "Filename keywords are valid evidence."
+                            : "Do not use filename keywords as evidence.",
+                        this.settings.bridgeUseFolderInput
+                            ? "Folder keywords are valid evidence."
+                            : "Do not use folder keywords as evidence.",
+                        this.settings.bridgeUseGeolocationInput
+                            ? "Known geolocation metadata is valid evidence."
+                            : "Do not use known geolocation metadata as evidence.",
                         "When enabled below, return a configured source when the evidence uses a direct linguistic equivalent even if the source word itself never appears.",
                         ...this.getLinguisticPromptInstructions(this.settings.bridgeLinguisticFeatures),
 
@@ -3345,19 +4808,20 @@ export default class BfmAutotagPlugin extends Plugin {
                 {
                     role: "user",
                     content: [
-                        `Generated tags: ${baseTags.length > 0 ? baseTags.join(", ") : "none"}`,
+                        `Generated tags: ${bridgeBaseTags.length > 0 ? bridgeBaseTags.join(", ") : "none"}`,
                         "",
                         "Image description:",
-                        aiDescription.trim() || "none",
+                        bridgeDescription.trim() || "none",
                         "",
-                        `Filename keywords: ${filenameCandidates.length > 0 ? filenameCandidates.join(", ") : "none"}`,
-                        `Folder keywords: ${folderTagCandidates.length > 0 ? folderTagCandidates.join(", ") : "none"}`,
+                        `Filename keywords: ${bridgeFilenameCandidates.length > 0 ? bridgeFilenameCandidates.join(", ") : "none"}`,
+                        `Folder keywords: ${bridgeFolderTagCandidates.length > 0 ? bridgeFolderTagCandidates.join(", ") : "none"}`,
+                        bridgeGeolocationContextText.trim() ? `Known geolocation metadata: ${bridgeGeolocationContextText.trim()}` : "",
                         "",
                         `The only allowed output values are these configured source concepts: ${sourceHint}`,
                         "",
                         "Judge these source concepts against every evidence section above, not only Generated tags.",
                         'Return represented configured source concepts only: {"aitags":["source1","source2"]}',
-                    ].join("\n"),
+                    ].filter(line => line !== "").join("\n"),
                 },
             ];
             const requestVariants = this.buildOllamaTagRequestVariants(model, messages);
@@ -3374,7 +4838,7 @@ export default class BfmAutotagPlugin extends Plugin {
                     if (response.status < 200 || response.status >= 300) continue;
 
                     const rawText = this.extractOllamaMessageText(response.json);
-                    console.log(`Maru\'s Autotag bridge source matching raw response (attempt ${attempt + 1}):`, rawText);
+                    console.log(`Autotag bridge source matching raw response (attempt ${attempt + 1}):`, rawText);
                     let validSourceCount = 0;
                     this.parseAiTags(rawText).forEach(source => {
                         const key = source.toLowerCase();
@@ -3384,9 +4848,9 @@ export default class BfmAutotagPlugin extends Plugin {
                         }
                     });
                     if (validSourceCount > 0 || rawText.trim() === '{"aitags":[]}' || this.isEmptyAiTagJsonResponse(rawText)) break;
-                    console.warn("Maru\'s Autotag bridge matcher returned no configured sources; retrying with the next request format.", rawText);
+                    console.warn("Autotag bridge matcher returned no configured sources; retrying with the next request format.", rawText);
                 } catch (e) {
-                    console.warn("Maru\'s Autotag bridge source matching attempt threw", {
+                    console.warn("Autotag bridge source matching attempt threw", {
                         attempt: attempt + 1,
                         model,
                         error: e instanceof Error ? e.message : String(e),
@@ -3395,7 +4859,7 @@ export default class BfmAutotagPlugin extends Plugin {
             }
         }
 
-        console.log("Maru\'s Autotag bridge matching:", {
+        console.log("Autotag bridge matching:", {
             configuredRules: rules,
             locallyOrSemanticallyMatchedSources: Array.from(matchedSources),
         });
@@ -3412,7 +4876,7 @@ export default class BfmAutotagPlugin extends Plugin {
         });
 
         const bridgeAdditions = Array.from(additions.values());
-        console.log("Maru\'s Autotag bridge additions:", bridgeAdditions);
+        console.log("Autotag bridge additions:", bridgeAdditions);
         return bridgeAdditions;
     }
 
@@ -3421,21 +4885,38 @@ export default class BfmAutotagPlugin extends Plugin {
         aiDescription: string,
         filenameCandidateHint: string,
         folderTagCandidateHint: string,
-        vaultVocabularyHint: string
+        folderMode: CandidateMode,
+        vaultVocabularyHint: string,
+        geolocationContextText: string = ""
     ): { role: string; content: string }[] {
+        const hasGeolocationContext = geolocationContextText.trim().length > 0;
+        const geolocationAllowedForAiTags = hasGeolocationContext && !this.settings.removeGeolocationFromAiTags;
+        const hasExcludedFolderCandidates = folderTagCandidateHint.includes("excluded:");
         return [
             {
                 role: "system",
                 content: [
                     "You select additional Obsidian semantic tags from known vault vocabulary.",
-                    'Respond with JSON only in this exact shape: {"aitags":["term"]}.',
+                    'Respond with JSON only in this exact shape: {"aitags":["term"],"relations":[{"candidate":"term","evidence":"exact evidence text","type":"word-family"}]}.',
                     `Return at most ${this.settings.maxVaultAwareAdditions} additional known vault concepts that genuinely fit; returning none is correct when none are clearly evidenced.`,
                     "Use only terms or supplied aliases from the known vault vocabulary candidates.",
-                    "Select concepts supported by the base domains, image description, active filename keywords, active folder tag keywords, or a manual enrichment rule source.",
+                    geolocationAllowedForAiTags
+                        ? "Select concepts supported by the base domains, image description, active filename keywords, known geolocation metadata, or a manual enrichment rule source."
+                        : "Select concepts supported by the base domains, image description, active filename keywords, or a manual enrichment rule source. Do not select location-specific concepts from geolocation metadata.",
+                    geolocationAllowedForAiTags
+                        ? "Folder tag keywords are context only. Do not copy them into the output unless they are supported by the image description, generated tags, geolocation metadata, or another direct source."
+                        : "Folder tag keywords are context only. Do not copy them into the output unless they are supported by the image description, generated tags, or another direct non-geolocation source.",
+                    hasExcludedFolderCandidates ? "Folder tag keywords marked Excluded must not be returned as vault-aware tags." : "",
+                    geolocationAllowedForAiTags
+                        ? "For location-specific terms, trust the known geolocation metadata and do not infer extra places, regions, countries, or landmarks that are not present there."
+                        : hasGeolocationContext
+                            ? "Known geolocation metadata is available only to prevent location guesses. Do not return city, country, region, landmark, road, address, GPS, coordinate, latitude, or longitude terms."
+                        : "Do not add city, country, landmark, or region concepts from visual style alone.",
                     ...this.getLinguisticPromptInstructions(this.settings.vaultLinguisticFeatures),
 
                     "Avoid category drift. Do not add concepts based merely on association, mood, style, genre, setting, co-occurrence, popularity, or recency.",
                     "Do not add a vault concept only because it is common, recent, or listed.",
+                    "For every returned term that is supported through different wording, add one relation entry. Copy the shortest supporting word or phrase exactly from the supplied evidence. Use a concise type such as word-family, synonym, compound, spelling, acronym, or broader-narrower. Do not add a relation when the candidate itself appears exactly.",
                     "Do not include markdown, hashtags, explanations, paths, or duplicate terms.",
                 ].join(" "),
             },
@@ -3448,11 +4929,14 @@ export default class BfmAutotagPlugin extends Plugin {
                     aiDescription.trim() || "none",
                     "",
                     `Filename keyword candidates (${this.settings.filenameCandidateMode}): ${filenameCandidateHint}`,
-                    `Folder tag keyword candidates (${this.settings.folderTagsCandidateMode}): ${folderTagCandidateHint}`,
+                    `Folder tag keyword candidates (${folderMode}): ${folderTagCandidateHint}`,
+                    hasGeolocationContext
+                        ? `${geolocationAllowedForAiTags ? "Known geolocation metadata" : "Known geolocation metadata (do not return as tags)"}: ${geolocationContextText.trim()}`
+                        : "",
                     `Known vault vocabulary candidates: ${vaultVocabularyHint}`,
                     "",
-                    'Return JSON only with clearly evidenced known vault concepts, or an empty list: {"aitags":["term1","term2"]}',
-                ].join("\n"),
+                    'Return JSON only with clearly evidenced known vault concepts and reusable evidence relations, or empty arrays: {"aitags":["term1","term2"],"relations":[{"candidate":"term1","evidence":"exact evidence text","type":"word-family"}]}',
+                ].filter(line => line !== "").join("\n"),
             },
         ];
     }
@@ -3460,6 +4944,7 @@ export default class BfmAutotagPlugin extends Plugin {
 
 
     isManualRuleSupportedTerm(term: string, evidenceText: string): boolean {
+        if (!this.settings.manualEnrichmentEnabled || !this.hasUsableBridgeInput()) return false;
         const normalizedTerm = this.normalizeAiTagName(term).toLowerCase();
         const normalizedEvidence = evidenceText.toLowerCase();
 
@@ -3480,14 +4965,21 @@ export default class BfmAutotagPlugin extends Plugin {
         baseTags: string[],
         aiDescription: string,
         filenameCandidates: string[],
-        folderTagCandidates: string[]
+        folderTagCandidates: string[],
+        geolocationContextText: string = ""
     ): boolean {
         const evidenceText = [
             baseTags.join(" "),
             aiDescription,
             filenameCandidates.join(" "),
-            folderTagCandidates.join(" "),
+            geolocationContextText,
         ].join(" ");
+
+        if (this.settings.learnedVaultRelations.some(relation =>
+            this.isLearnedVaultRelationReusable(relation)
+            && relation.candidate.toLowerCase() === term.toLowerCase()
+            && this.hasLearnedRelationEvidence(relation.evidence, evidenceText)
+        )) return true;
 
         if (this.isConceptSupportedLocally(term, evidenceText, this.settings.vaultLinguisticFeatures)) return true;
 
@@ -3513,8 +5005,11 @@ export default class BfmAutotagPlugin extends Plugin {
         baseTags: string[],
         aiDescription: string,
         filenameCandidates: string[],
-        folderTagCandidates: string[]
+        folderTagCandidates: string[],
+        geolocationContextText: string = ""
     ): { role: string; content: string }[] {
+        const hasGeolocationContext = geolocationContextText.trim().length > 0;
+        const geolocationAllowedForAiTags = hasGeolocationContext && !this.settings.removeGeolocationFromAiTags;
         return [
             {
                 role: "system",
@@ -3526,8 +5021,14 @@ export default class BfmAutotagPlugin extends Plugin {
                     "Reject terms based merely on association, mood, style, genre, setting, co-occurrence, popularity, recency, or because they appeared in a candidate list.",
                     "For synonyms, aliases, spelling variants, compounds, acronyms, and grammatical variants, accept only close equivalents that a human would see as the same visible or described concept.",
                     "For broader or narrower concepts, accept only an immediate category relationship that is unmistakably supported by the evidence; avoid chains of generalization.",
+                    "Folder keywords are context only; do not keep a proposed term only because it appears as a folder keyword.",
+                    geolocationAllowedForAiTags
+                        ? "For location-specific terms, trust only the known geolocation metadata and direct evidence."
+                        : hasGeolocationContext
+                            ? "Known geolocation metadata is available only to prevent location guesses. Reject city, country, region, landmark, road, address, GPS, coordinate, latitude, or longitude terms."
+                            : "Reject location-specific terms that are only guessed from style or architecture.",
                     "Return only exact proposed terms. If none are clearly supported, return an empty aitags array.",
-                ].join(" "),
+                ].filter(Boolean).join(" "),
             },
             {
                 role: "user",
@@ -3539,10 +5040,13 @@ export default class BfmAutotagPlugin extends Plugin {
                     "",
                     `Filename keywords: ${filenameCandidates.length > 0 ? filenameCandidates.join(", ") : "none"}`,
                     `Folder keywords: ${folderTagCandidates.length > 0 ? folderTagCandidates.join(", ") : "none"}`,
+                    hasGeolocationContext
+                        ? `${geolocationAllowedForAiTags ? "Known geolocation metadata" : "Known geolocation metadata (do not return as tags)"}: ${geolocationContextText.trim()}`
+                        : "",
                     `Proposed vault terms to verify: ${proposedTerms.join(", ")}`,
                     "",
                     'Return only the proposed terms with clear evidence: {"aitags":["term1","term2"]}',
-                ].join("\n"),
+                ].filter(line => line !== "").join("\n"),
             },
         ];
     }
@@ -3554,6 +5058,7 @@ export default class BfmAutotagPlugin extends Plugin {
         aiDescription: string,
         filenameCandidates: string[],
         folderTagCandidates: string[],
+        geolocationContextText: string,
         endpoint: string,
         model: string
     ): Promise<string[]> {
@@ -3576,8 +5081,8 @@ export default class BfmAutotagPlugin extends Plugin {
                 : normalized;
             if (!allowed.has(normalized.toLowerCase()) && !allowed.has(output.toLowerCase())) return;
 
-            if (this.isVaultAwareTermSupported(output, baseTags, aiDescription, filenameCandidates, folderTagCandidates)
-                || this.isVaultAwareTermSupported(normalized, baseTags, aiDescription, filenameCandidates, folderTagCandidates)) {
+            if (this.isVaultAwareTermSupported(output, baseTags, aiDescription, filenameCandidates, folderTagCandidates, geolocationContextText)
+                || this.isVaultAwareTermSupported(normalized, baseTags, aiDescription, filenameCandidates, folderTagCandidates, geolocationContextText)) {
                 accepted.set(output.toLowerCase(), output);
                 return;
             }
@@ -3595,7 +5100,8 @@ export default class BfmAutotagPlugin extends Plugin {
             baseTags,
             aiDescription,
             filenameCandidates,
-            folderTagCandidates
+            folderTagCandidates,
+            geolocationContextText
         );
         const requestVariants = this.buildOllamaTagRequestVariants(model, messages);
         const proposed = new Map(proposedTerms.map(term => [term.toLowerCase(), term]));
@@ -3612,7 +5118,7 @@ export default class BfmAutotagPlugin extends Plugin {
                 if (response.status < 200 || response.status >= 300) continue;
 
                 const rawText = this.extractOllamaMessageText(response.json);
-                console.log(`Maru\'s Autotag vault evidence gate raw response (attempt ${attempt + 1}):`, rawText);
+                console.log(`Autotag vault evidence gate raw response (attempt ${attempt + 1}):`, rawText);
                 const confirmed = this.parseAiTags(rawText);
                 confirmed.forEach(term => {
                     const normalized = this.normalizeAiTagName(term);
@@ -3623,7 +5129,7 @@ export default class BfmAutotagPlugin extends Plugin {
                 });
                 if (rawText.trim()) break;
             } catch (e) {
-                console.warn("Maru\'s Autotag vault evidence gate attempt threw", {
+                console.warn("Autotag vault evidence gate attempt threw", {
                     attempt: attempt + 1,
                     model,
                     error: e instanceof Error ? e.message : String(e),
@@ -3639,17 +5145,26 @@ export default class BfmAutotagPlugin extends Plugin {
         aiDescription: string,
         filenameCandidates: string[],
         folderTagCandidates: string[],
+        folderStrongTagCandidates: string[],
+        folderExcludedTagCandidates: string[],
+        folderMode: CandidateMode,
+        geolocationContextText: string,
         endpoint: string,
-        model: string
+        model: string,
+        learningEvidenceTags: string[] = baseTags
     ): Promise<string[]> {
         if (!this.settings.vaultAwarenessEnabled) {
             return [];
         }
 
+        const vaultEvidenceText = `${aiDescription} ${learningEvidenceTags.join(" ")} ${filenameCandidates.join(" ")} ${geolocationContextText}`;
         const rankedVocabularyTerms = this.getRankedVaultVocabularyTerms(
-            `${aiDescription} ${baseTags.join(" ")}`,
+            `${aiDescription} ${baseTags.join(" ")} ${geolocationContextText}`,
             filenameCandidates,
-            folderTagCandidates
+            folderTagCandidates,
+            geolocationContextText,
+            folderExcludedTagCandidates,
+            folderStrongTagCandidates
         );
         const vaultVocabularyHint = rankedVocabularyTerms.length > 0
             ? rankedVocabularyTerms.map(term => this.settings.vaultLinguisticFeatures.vaultAliases !== "exclude" ? this.getVaultPromptLabel(term) : term).join(", ")
@@ -3657,17 +5172,20 @@ export default class BfmAutotagPlugin extends Plugin {
         const filenameCandidateHint = filenameCandidates.length > 0 ? filenameCandidates.join(", ") : "none";
         const folderTagCandidateHint = folderTagCandidates.length > 0 ? folderTagCandidates.join(", ") : "none";
 
-        console.log("Maru\'s Autotag vault candidates:", rankedVocabularyTerms);
+        console.log("Autotag vault candidates:", rankedVocabularyTerms);
         if (rankedVocabularyTerms.length === 0) {
             return [];
         }
+        const learnedSelections = this.getLearnedVaultSelections(rankedVocabularyTerms, vaultEvidenceText);
 
         const messages = this.buildOllamaVaultAwarenessMessages(
             baseTags,
             aiDescription,
             filenameCandidateHint,
             folderTagCandidateHint,
-            vaultVocabularyHint
+            folderMode,
+            vaultVocabularyHint,
+            geolocationContextText
         );
         const requestVariants = this.buildOllamaTagRequestVariants(model, messages);
 
@@ -3682,7 +5200,7 @@ export default class BfmAutotagPlugin extends Plugin {
                 });
 
                 if (response.status < 200 || response.status >= 300) {
-                    console.warn("Maru\'s Autotag vault awareness attempt failed", {
+                    console.warn("Autotag vault awareness attempt failed", {
                         attempt: attempt + 1,
                         model,
                         status: response.status,
@@ -3692,22 +5210,28 @@ export default class BfmAutotagPlugin extends Plugin {
                 }
 
                 const rawText = this.extractOllamaMessageText(response.json);
-                console.log(`Maru\'s Autotag vault awareness raw response (attempt ${attempt + 1}):`, rawText);
-                const selected = this.parseAiTags(rawText);
+                console.log(`Autotag vault awareness raw response (attempt ${attempt + 1}):`, rawText);
+                const selected = this.normalizeUniqueAiTags([
+                    ...this.parseAiTags(rawText),
+                    ...learnedSelections,
+                ]);
                 if (selected.length > 0) {
-                    return await this.filterVaultAwareSelections(
+                    const accepted = await this.filterVaultAwareSelections(
                         selected,
                         rankedVocabularyTerms,
                         baseTags,
                         aiDescription,
                         filenameCandidates,
                         folderTagCandidates,
+                        geolocationContextText,
                         endpoint,
                         model
                     );
+                    await this.rememberLearnedVaultRelations(rawText, accepted, vaultEvidenceText, model);
+                    if (accepted.length > 0) return accepted;
                 }
             } catch (e) {
-                console.warn("Maru\'s Autotag vault awareness attempt threw", {
+                console.warn("Autotag vault awareness attempt threw", {
                     attempt: attempt + 1,
                     model,
                     error: e instanceof Error ? e.message : String(e),
@@ -3715,6 +5239,33 @@ export default class BfmAutotagPlugin extends Plugin {
             }
         }
 
+        if (learnedSelections.length > 0) {
+            const acceptedLearnedSelections = await this.filterVaultAwareSelections(
+                learnedSelections,
+                rankedVocabularyTerms,
+                baseTags,
+                aiDescription,
+                filenameCandidates,
+                folderTagCandidates,
+                geolocationContextText,
+                endpoint,
+                model
+            );
+            if (acceptedLearnedSelections.length > 0) return acceptedLearnedSelections;
+        }
+        const discovered = await this.discoverLearnedVaultRelations(
+            rankedVocabularyTerms,
+            aiDescription,
+            learningEvidenceTags,
+            filenameCandidates,
+            geolocationContextText,
+            endpoint,
+            model
+        );
+        if (discovered.terms.length > 0) {
+            await this.rememberLearnedVaultRelations(discovered.rawText, discovered.terms, vaultEvidenceText, model);
+            return discovered.terms;
+        }
         return [];
     }
     buildOllamaTagRequestVariants(
@@ -3750,42 +5301,86 @@ export default class BfmAutotagPlugin extends Plugin {
     async generateAiTags(
         aiDescription: string | null,
         folderCandidateValues: string[],
-        file: TFile | null = null
+        file: TFile | null = null,
+        geolocationContext: ImageGeolocationContext | null = null,
+        folderGeneratedValues: string[] = folderCandidateValues,
+        folderExcludedCandidateValues: string[] = [],
+        folderStrongCandidateValues: string[] = folderCandidateValues,
+        folderConsiderCandidateValues: string[] = []
     ): Promise<GeneratedAiTagResult> {
-        if (!this.settings.aiTaggingEnabled) {
-            return { aiTags: [], vaultAwarenessTags: [] };
-        }
-
         const filenameCandidates = this.getFilenameKeywordCandidates(file);
-        const folderTagCandidates = this.getFolderTagCandidates(folderCandidateValues);
+        const folderStrongTagCandidates = this.getFolderTagCandidates(folderStrongCandidateValues);
+        const folderConsiderTagCandidates = this.getFolderTagCandidates(folderConsiderCandidateValues);
+        const folderExcludedTagCandidates = this.getFolderTagCandidates(folderExcludedCandidateValues);
+        const folderTagCandidates = this.normalizeUniqueAiTags([...folderStrongTagCandidates, ...folderConsiderTagCandidates]);
         const activeFilenameCandidates = this.isCandidateSourceActive(this.settings.filenameCandidateMode) ? filenameCandidates : [];
-        const activeFolderTagCandidates = this.isCandidateSourceActive(this.settings.folderTagsCandidateMode) ? folderTagCandidates : [];
+        const activeFolderTagCandidates = folderTagCandidates;
+        const geolocationContextText = this.formatGeolocationContextForAiTags(geolocationContext);
+        const bridgeGeolocationContextText = this.formatGeolocationContextForDescription(geolocationContext);
         const descriptionText = aiDescription?.trim() ?? "";
         const canUseFilenameOnly = this.settings.filenameCandidateMode === "all" && filenameCandidates.length > 0;
-        const canUseFolderOnly = this.settings.folderTagsCandidateMode === "all" && folderTagCandidates.length > 0;
+        const canUseFolderOnly = folderStrongTagCandidates.length > 0;
+        const canUseGeolocationOnly = geolocationContextText.length > 0 && !this.settings.removeGeolocationFromAiTags;
+        const folderPromptMode = this.getFolderCandidatePromptMode(
+            folderStrongTagCandidates,
+            folderConsiderTagCandidates,
+            folderExcludedTagCandidates
+        );
+        const buildDirectBridgeAiTags = () => {
+            const directBridgeTags = this.expandAiTagsWithKnownVocabulary(
+                [],
+                activeFilenameCandidates,
+                activeFolderTagCandidates,
+                folderExcludedTagCandidates,
+                bridgeGeolocationContextText
+            );
+            const aiTagsWithoutFilenameNoise = this.filterFilenameNoiseFromAiTags(directBridgeTags, file);
+            return this.filterGeolocationTermsFromAiTags(
+                this.filterFolderTermsFromAiTags(aiTagsWithoutFilenameNoise, folderGeneratedValues),
+                geolocationContext
+            );
+        };
 
-        if (!descriptionText && !canUseFilenameOnly && !canUseFolderOnly) {
-            return { aiTags: [], vaultAwarenessTags: [] };
+        if (!this.settings.aiTaggingEnabled) {
+            return { aiTags: buildDirectBridgeAiTags(), vaultAwarenessTags: [] };
+        }
+
+        if (!descriptionText && !canUseFilenameOnly && !canUseFolderOnly && !canUseGeolocationOnly) {
+            return { aiTags: buildDirectBridgeAiTags(), vaultAwarenessTags: [] };
         }
 
         const endpoint = this.getOllamaChatUrl();
         const model = this.settings.ollamaModel.trim();
 
         if (!endpoint || !model) {
+            const directBridgeTags = buildDirectBridgeAiTags();
+            if (directBridgeTags.length > 0) {
+                return { aiTags: directBridgeTags, vaultAwarenessTags: [] };
+            }
             new Notice("Ollama settings are incomplete");
             return { aiTags: [], vaultAwarenessTags: [] };
         }
 
         const filenameCandidateHint = activeFilenameCandidates.length > 0 ? activeFilenameCandidates.join(", ") : "none";
-        const folderTagCandidateHint = activeFolderTagCandidates.length > 0 ? activeFolderTagCandidates.join(", ") : "none";
-        console.log("Maru\'s Autotag filename candidates:", filenameCandidates);
-        console.log("Maru\'s Autotag folder tag candidates:", folderTagCandidates);
+        const folderTagCandidateHint = this.formatFolderCandidatePromptHint(
+            folderStrongTagCandidates,
+            folderConsiderTagCandidates,
+            folderExcludedTagCandidates
+        );
+        console.log("Autotag filename candidates:", filenameCandidates);
+        console.log("Autotag folder tag candidates:", {
+            all: folderStrongTagCandidates,
+            consider: folderConsiderTagCandidates,
+            excluded: folderExcludedTagCandidates,
+        });
+        if (geolocationContextText) console.log("Autotag geolocation AI tag context:", geolocationContextText);
         const messages = this.buildOllamaTagMessages(
             descriptionText,
             filenameCandidateHint,
             this.settings.filenameCandidateMode,
             folderTagCandidateHint,
-            this.settings.folderTagsCandidateMode
+            folderPromptMode,
+            geolocationContextText
         );
         const requestVariants = this.buildOllamaTagRequestVariants(model, messages);
 
@@ -3808,7 +5403,7 @@ export default class BfmAutotagPlugin extends Plugin {
 
                 if (response.status < 200 || response.status >= 300) {
                     lastError = `HTTP ${response.status}: ${response.text?.slice(0, 300) || "no response body"}`;
-                    console.warn("Maru\'s Autotag Ollama attempt failed", {
+                    console.warn("Autotag Ollama attempt failed", {
                         attempt: attempt + 1,
                         model,
                         status: response.status,
@@ -3820,25 +5415,53 @@ export default class BfmAutotagPlugin extends Plugin {
 
                 const rawText = this.extractOllamaMessageText(response.json);
                 lastRawText = rawText;
-                console.log(`Maru\'s Autotag Ollama raw response (attempt ${attempt + 1}):`, rawText);
+                console.log(`Autotag Ollama raw response (attempt ${attempt + 1}):`, rawText);
 
                 const tags = this.parseAiTags(rawText);
                 if (tags.length > 0) {
-                    const canonicalTags = tags.map(tag =>
-                        this.canonicalizeVaultTerm(tag, this.settings.vaultLinguisticFeatures.canonicalization === "use")
+                    const canonicalTags = this.filterUnsupportedCandidateEchoTags(
+                        tags.map(tag =>
+                            this.canonicalizeVaultTerm(tag, this.settings.vaultLinguisticFeatures.canonicalization === "use")
+                        ),
+                        descriptionText,
+                        activeFolderTagCandidates,
+                        geolocationContextText
                     );
-                    const bridgeTags = await this.applySubjectBridgeTags(canonicalTags, descriptionText, activeFilenameCandidates, activeFolderTagCandidates, endpoint, model);
+                    if (canonicalTags.length === 0) {
+                        lastError = "response only contained unsupported folder candidate echoes";
+                        console.warn("Autotag removed unsupported folder candidate echoes from Ollama response", tags);
+                        continue;
+                    }
+                    const bridgeTags = await this.applySubjectBridgeTags(canonicalTags, descriptionText, activeFilenameCandidates, activeFolderTagCandidates, bridgeGeolocationContextText, endpoint, model);
                     const tagsWithBridges = [...canonicalTags, ...bridgeTags];
-                    const vaultTags = await this.selectVaultAwareTags(tagsWithBridges, descriptionText, activeFilenameCandidates, activeFolderTagCandidates, endpoint, model);
+                    const vaultTags = await this.selectVaultAwareTags(
+                        tagsWithBridges,
+                        descriptionText,
+                        activeFilenameCandidates,
+                        activeFolderTagCandidates,
+                        folderStrongTagCandidates,
+                        folderExcludedTagCandidates,
+                        folderPromptMode,
+                        geolocationContextText,
+                        endpoint,
+                        model,
+                        canonicalTags
+                    );
                     const postVaultBridgeTags = this.settings.bridgeUsePreBridgeVaultAwarenessOutput
                         ? this.applyDeterministicSubjectBridgeTags(
                             [...tagsWithBridges, ...vaultTags],
                             descriptionText,
                             activeFilenameCandidates,
-                            activeFolderTagCandidates
+                            activeFolderTagCandidates,
+                            bridgeGeolocationContextText
                         )
                         : [];
-                    const vaultAwarenessTags = this.normalizeUniqueAiTags([...vaultTags, ...postVaultBridgeTags]);
+                    const vaultAwarenessTags = this.filterUnsupportedCandidateEchoTags(
+                        this.normalizeUniqueAiTags([...vaultTags, ...postVaultBridgeTags]),
+                        descriptionText,
+                        activeFolderTagCandidates,
+                        geolocationContextText
+                    );
                     const includeVaultAwarenessInAiTags = !this.settings.vaultAwarenessOutputEnabled || !this.settings.vaultAwarenessOutputExclusive;
                     const aiTagInputs = includeVaultAwarenessInAiTags
                         ? [...tagsWithBridges, ...vaultAwarenessTags]
@@ -3848,21 +5471,26 @@ export default class BfmAutotagPlugin extends Plugin {
                             ? []
                             : vaultAwarenessTags.map(tag => tag.toLowerCase())
                     );
-                    const aiTags = this.expandAiTagsWithKnownVocabulary(aiTagInputs, filenameCandidates, folderTagCandidates)
+                    const expandedAiTags = this.expandAiTagsWithKnownVocabulary(aiTagInputs, filenameCandidates, folderTagCandidates, folderExcludedTagCandidates, bridgeGeolocationContextText)
                         .filter(tag => !excludedVaultAwarenessTags.has(tag.toLowerCase()));
+                    const aiTagsWithoutFilenameNoise = this.filterFilenameNoiseFromAiTags(expandedAiTags, file);
+                    const aiTags = this.filterGeolocationTermsFromAiTags(
+                        this.filterFolderTermsFromAiTags(aiTagsWithoutFilenameNoise, folderGeneratedValues),
+                        geolocationContext
+                    );
 
-                    return { aiTags, vaultAwarenessTags };
+                    return { aiTags, vaultAwarenessTags, hadAiTagResponse: true };
                 }
 
                 if (rawText.trim()) {
                     lastError = "response contained no parseable aitags";
-                    console.warn("Maru\'s Autotag: Ollama returned text but no aitags were parsed", rawText);
+                    console.warn("Autotag: Ollama returned text but no aitags were parsed", rawText);
                 } else {
                     lastError = "empty Ollama response";
                 }
             } catch (e) {
                 lastError = e instanceof Error ? e.message : String(e);
-                console.warn("Maru\'s Autotag Ollama attempt threw", {
+                console.warn("Autotag Ollama attempt threw", {
                     attempt: attempt + 1,
                     model,
                     error: lastError,
@@ -3870,11 +5498,16 @@ export default class BfmAutotagPlugin extends Plugin {
             }
         }
 
-        console.error("Maru\'s Autotag: all Ollama tag attempts failed", {
+        console.error("Autotag: all Ollama tag attempts failed", {
             model,
             lastError,
             lastRawText,
         });
+        const directBridgeTags = buildDirectBridgeAiTags();
+        if (directBridgeTags.length > 0) {
+            console.warn("Autotag: Ollama semantic tags failed; writing deterministic direct Bridge tags.", directBridgeTags);
+            return { aiTags: directBridgeTags, vaultAwarenessTags: [] };
+        }
         new Notice(`Ollama semantic tags failed for ${model} - check console`);
         return { aiTags: [], vaultAwarenessTags: [] };
     }
@@ -3946,6 +5579,15 @@ export default class BfmAutotagPlugin extends Plugin {
             console.error("Could not list Ollama models", e);
             return [];
         }
+    }
+
+    normalizeOllamaModelNameForCompare(modelName: string): string {
+        return modelName.trim().toLowerCase().replace(/:latest$/, "");
+    }
+
+    hasPulledOllamaModel(pulledModels: string[], selectedModel: string): boolean {
+        const normalizedSelected = this.normalizeOllamaModelNameForCompare(selectedModel);
+        return pulledModels.some(model => this.normalizeOllamaModelNameForCompare(model) === normalizedSelected);
     }
 
     async pullOllamaModel(modelName: string): Promise<boolean> {
@@ -4159,8 +5801,19 @@ export default class BfmAutotagPlugin extends Plugin {
     sleep(ms: number): Promise<void> {
         return new Promise(resolve => window.setTimeout(resolve, ms));
     }
+
+    getRetryWaitMs(retryNumber: number): number {
+        const initialWaitSeconds = this.clampSetting(
+            this.settings.retryInitialWaitSeconds,
+            DEFAULT_SETTINGS.retryInitialWaitSeconds,
+            1,
+            30
+        );
+        return initialWaitSeconds * 1000 * Math.max(1, Math.round(retryNumber));
+    }
+
     getFailedFile(path: string): FailedProcessingFile | undefined {
-        return this.settings.failedFiles.find(file => file.path === path);
+        return this.settings.failedFiles.find(file => this.areVaultPathsSame(file.path, path));
     }
 
     hasReachedMaxAttempts(path: string): boolean {
@@ -4169,7 +5822,7 @@ export default class BfmAutotagPlugin extends Plugin {
     }
 
     clearFailedFile(path: string): boolean {
-        const index = this.settings.failedFiles.findIndex(file => file.path === path);
+        const index = this.settings.failedFiles.findIndex(file => this.areVaultPathsSame(file.path, path));
         if (index !== -1) {
             this.settings.failedFiles.splice(index, 1);
             return true;
@@ -4177,7 +5830,7 @@ export default class BfmAutotagPlugin extends Plugin {
         return false;
     }
     getProtectedJob(path: string): ProtectedProcessingJob | undefined {
-        return this.settings.protectedJobs.find(job => job.path === path);
+        return this.settings.protectedJobs.find(job => this.areVaultPathsSame(job.path, path));
     }
 
     upsertProtectedJob(path: string, updates: Partial<ProtectedProcessingJob>): void {
@@ -4200,7 +5853,7 @@ export default class BfmAutotagPlugin extends Plugin {
 
     removeProtectedJob(path: string): boolean {
         const before = this.settings.protectedJobs.length;
-        this.settings.protectedJobs = this.settings.protectedJobs.filter(job => job.path !== path);
+        this.settings.protectedJobs = this.settings.protectedJobs.filter(job => !this.areVaultPathsSame(job.path, path));
         return this.settings.protectedJobs.length !== before;
     }
 
@@ -4208,11 +5861,11 @@ export default class BfmAutotagPlugin extends Plugin {
         let changed = false;
         this.settings.pendingGeocodeJobs = this.settings.pendingGeocodeJobs.map(job => {
             const updated = { ...job };
-            if (updated.imagePath === oldPath) {
+            if (this.areVaultPathsSame(updated.imagePath, oldPath)) {
                 updated.imagePath = newPath;
                 changed = true;
             }
-            if (updated.notePath === oldPath) {
+            if (this.areVaultPathsSame(updated.notePath, oldPath)) {
                 updated.notePath = newPath;
                 changed = true;
             }
@@ -4244,16 +5897,18 @@ export default class BfmAutotagPlugin extends Plugin {
         let shutdownResumed = 0;
         let manualVaultResumed = 0;
         let removed = 0;
+        let recoveredProcessedMarkers = 0;
 
         for (const job of jobs) {
-            if (this.settings.processedFiles.includes(job.path)) {
-                if (this.removeProtectedJob(job.path)) removed += 1;
-                continue;
+            const processedIndex = this.settings.processedFiles.findIndex(processedPath => this.areVaultPathsSame(processedPath, job.path));
+            if (processedIndex !== -1) {
+                this.settings.processedFiles.splice(processedIndex, 1);
+                recoveredProcessedMarkers += 1;
             }
             if (this.hasReachedMaxAttempts(job.path)) {
                 continue;
             }
-            const file = this.app.vault.getAbstractFileByPath(job.path);
+            const file = this.getVaultFileByPathFlexible(job.path);
             if (file instanceof TFile) {
                 const source = job.source ?? "shutdown";
                 this.enqueueFile(file, true, source);
@@ -4265,18 +5920,21 @@ export default class BfmAutotagPlugin extends Plugin {
             }
         }
 
-        if (removed > 0) await this.saveSettings();
+        if (removed > 0 || recoveredProcessedMarkers > 0) await this.saveSettings();
         if (shutdownResumed > 0) {
-            new Notice(`Maru\'s Autotag Shutdown Protection resumed ${shutdownResumed} file${shutdownResumed === 1 ? "" : "s"}.`);
+            new Notice(`Autotag Shutdown Protection resumed ${shutdownResumed} file${shutdownResumed === 1 ? "" : "s"}.`);
         }
         if (manualVaultResumed > 0) {
-            new Notice(`Maru\'s Autotag resumed ${manualVaultResumed} manually queued vault file${manualVaultResumed === 1 ? "" : "s"}.`);
+            new Notice(`Autotag resumed ${manualVaultResumed} manually queued vault file${manualVaultResumed === 1 ? "" : "s"}.`);
         }
     }
     getFailureCategory(reason: string): string {
         const normalized = reason.toLowerCase();
-        if (normalized.includes("bfm note not found")) return "BFM companion note not found";
-        if (normalized.includes("ai image analyzer returned no description")) return "AI Image Analyzer returned no description";
+        if (normalized.includes("bfm note not found")
+            || normalized.includes("companion note not found")
+            || normalized.includes("companion note could not be created")
+            || normalized.includes("companion note creation was not verified")) return "Companion note could not be created";
+        if (normalized.includes("ai image analyzer returned no description") || normalized.includes("image analysis returned no description")) return "Image analysis returned no description";
         if (normalized.includes("ollama did not return")) return "Ollama returned no AI tags";
         if (normalized.includes("could not load image") || normalized.includes("visual duplicate hash failed")) return "Image preview or visual hash failed";
         if (normalized.includes("permission") || normalized.includes("eperm") || normalized.includes("access") || normalized.includes("denied")) return "File permission or sync lock";
@@ -4287,18 +5945,18 @@ export default class BfmAutotagPlugin extends Plugin {
 
     getFailureSolutions(reason: string): string[] {
         const category = this.getFailureCategory(reason);
-        if (category === "BFM companion note not found") {
+        if (category === "Companion note could not be created") {
             return [
-                "Check that Binary File Manager and Maru\'s Autotag use the same companion-note folder.",
-                "Check that BFM File name format in Autotag exactly matches BFM's metadata filename format, including prefixes, suffixes and casing.",
-                "Increase the BFM note wait time if BFM creates notes slowly.",
-                "Make sure BFM actually created the companion note for this image.",
+                "Check that the Companion Note Folder points to the folder where companion notes should be created.",
+                "Check that Companion Note Name Format creates the expected note name for this image.",
+                "Increase Companion note creation retries in Processing & Queue if notes appear slowly or sync delays are involved.",
+                "Check whether another file or folder already exists at the expected companion note path.",
             ];
         }
-        if (category === "AI Image Analyzer returned no description") {
+        if (category === "Image analysis returned no description") {
             return [
-                "Check that AI Image Analyzer is enabled and can analyze this image type.",
-                "Try opening AI Image Analyzer directly on the image to see whether it returns a description.",
+                "Check that Image Analysis is enabled and the selected Ollama vision model is pulled.",
+                "Try a different vision model if this file type or image does not return a description.",
                 "If filename or folder keyword fallback should be enough, check those candidate modes in Autotag settings.",
             ];
         }
@@ -4340,14 +5998,14 @@ export default class BfmAutotagPlugin extends Plugin {
         }
         return [
             "Retry the failed file once after checking that the companion note exists.",
-            "Open the developer console and look for the full Maru\'s Autotag error near the time of failure.",
+            "Open the developer console and look for the full Autotag error near the time of failure.",
             "If the same file fails repeatedly, copy the failed-file list and inspect the exact reason text.",
         ];
     }
 
     getFailureNoticeText(file: TFile, reason: string, attempts: number): string {
         const category = this.getFailureCategory(reason);
-        return `Maru\'s Autotag failed (${attempts}/${this.settings.maxProcessingAttempts}): ${category} - ${file.name}`;
+        return `Autotag failed (${attempts}/${this.settings.maxProcessingAttempts}): ${category} - ${file.name}`;
     }
 
     buildFailureHelpNoteContent(): string {
@@ -4355,9 +6013,9 @@ export default class BfmAutotagPlugin extends Plugin {
             .sort((a, b) => b.lastFailedAt - a.lastFailedAt)
             .slice(0, 10);
         const lines = [
-            "# Maru\'s Autotag Failure Help",
+            "# Autotag Failure Help",
             "",
-            "This note was generated by Maru\'s Autotag. You may delete it after reading.",
+            "This note was generated by Autotag. You may delete it after reading.",
             "",
             recentFailures.length > 0
                 ? `Recent failed files: ${recentFailures.length}`
@@ -4366,7 +6024,7 @@ export default class BfmAutotagPlugin extends Plugin {
         ];
 
         if (recentFailures.length === 0) {
-            lines.push("## General Checks", "", "- Check that Binary File Manager and Maru\'s Autotag use matching folder and filename settings.", "- Check that AI Image Analyzer and Ollama are enabled only when you want them used.", "- Check the developer console if something stops without a visible notice.", "");
+            lines.push("## General Checks", "", "- Check that the source folder, companion-note folder, and companion-note name format match your vault workflow.", "- Check that Image Analysis and Ollama tagging are enabled only when you want them used.", "- Check the developer console if something stops without a visible notice.", "");
             return lines.join("\n");
         }
 
@@ -4390,7 +6048,7 @@ export default class BfmAutotagPlugin extends Plugin {
     }
 
     async openFailureHelpNote(): Promise<void> {
-        const notePath = "Maru\'s Autotag Failure Help.md";
+        const notePath = "Autotag Failure Help.md";
         const content = this.buildFailureHelpNoteContent();
         const existing = this.app.vault.getAbstractFileByPath(notePath);
         let note: TFile;
@@ -4401,7 +6059,7 @@ export default class BfmAutotagPlugin extends Plugin {
             note = await this.app.vault.create(notePath, content);
         }
         await this.app.workspace.getLeaf(false).openFile(note);
-        new Notice("Maru\'s Autotag failure help note opened. You may delete it after reading.");
+        new Notice("Autotag failure help note opened. You may delete it after reading.");
     }
 
     async recordProcessingFailure(file: TFile, reason: string, shouldRetry = true): Promise<void> {
@@ -4425,9 +6083,14 @@ export default class BfmAutotagPlugin extends Plugin {
         const attempts = failedFile?.attempts ?? 1;
         new Notice(this.getFailureNoticeText(file, reason, attempts), 8000);
         if (shouldRetry && attempts < this.settings.maxProcessingAttempts) {
-            this.enqueueFile(file, true);
+            await this.sleep(this.getRetryWaitMs(attempts));
+            const currentFailure = this.getFailedFile(file.path);
+            const currentFile = this.getVaultFileByPathFlexible(file.path);
+            if (currentFailure?.attempts === attempts && currentFile instanceof TFile) {
+                this.enqueueFile(currentFile, true, "shutdown", true);
+            }
         } else if (shouldRetry) {
-            new Notice(`Maru\'s Autotag stopped retrying. Open the failure help note for likely fixes: ${file.name}`, 10000);
+            new Notice(`Autotag stopped retrying. Open the failure help note for likely fixes: ${file.name}`, 10000);
         }
     }
 
@@ -4436,7 +6099,7 @@ export default class BfmAutotagPlugin extends Plugin {
         let queued = 0;
 
         for (const failedFile of failedFiles) {
-            const file = this.app.vault.getAbstractFileByPath(failedFile.path);
+            const file = this.getVaultFileByPathFlexible(failedFile.path);
             if (file instanceof TFile) {
                 failedFile.attempts = 0;
                 failedFile.reason = "Manual retry requested";
@@ -4459,7 +6122,7 @@ export default class BfmAutotagPlugin extends Plugin {
     buildForgottenFilesNoteContent(files: TFile[], missingPaths: string[], totalProcessedBefore: number): string {
         const timestamp = new Date().toLocaleString();
         const lines = [
-            "# Maru\'s Autotag Forgotten Files",
+            "# Autotag Forgotten Files",
             "",
             `Created: ${timestamp}`,
             "",
@@ -4470,14 +6133,14 @@ export default class BfmAutotagPlugin extends Plugin {
             `- Processed files before forgetting: ${totalProcessedBefore}`,
             `- Existing file paths found: ${files.length}`,
             `- Missing file paths skipped: ${missingPaths.length}`,
-            `- Companion notes are listed from the current BFM File name format setting.`,
+            `- Companion notes are listed from the current Companion Note Name Format setting.`,
             "",
             "## Previously Processed Files",
             "",
         ];
 
         files.forEach(file => {
-            lines.push(`- [[${file.path}]]`, `- [[${this.getBfmNotePath(file)}]]`);
+            lines.push(`- [[${file.path}]]`, `- [[${this.getCompanionNotePath(file)}]]`);
         });
 
         if (missingPaths.length > 0) {
@@ -4489,7 +6152,7 @@ export default class BfmAutotagPlugin extends Plugin {
     }
 
     async createForgottenFilesNote(files: TFile[], missingPaths: string[], totalProcessedBefore: number): Promise<void> {
-        const notePath = "Maru\'s Autotag Forgotten Files.md";
+        const notePath = "Autotag Forgotten Files.md";
         const content = this.buildForgottenFilesNoteContent(files, missingPaths, totalProcessedBefore);
         const existing = this.app.vault.getAbstractFileByPath(notePath);
         if (existing instanceof TFile) {
@@ -4557,8 +6220,8 @@ export default class BfmAutotagPlugin extends Plugin {
     }
 
     async processSingleFileAgain(path: string): Promise<void> {
-        const file = this.app.vault.getAbstractFileByPath(path);
-        if (!(file instanceof TFile) || file.extension.toLowerCase() === "md" || !file.path.startsWith(this.settings.basePath)) {
+        const file = this.getVaultFileByPathFlexible(path);
+        if (!(file instanceof TFile) || file.extension.toLowerCase() === "md" || !this.isPathInBasePath(file.path)) {
             new Notice("Select an image/source file inside the watched Base Path.");
             return;
         }
@@ -4568,7 +6231,7 @@ export default class BfmAutotagPlugin extends Plugin {
         }
 
         const beforeProcessedCount = this.settings.processedFiles.length;
-        this.settings.processedFiles = this.settings.processedFiles.filter(processedPath => processedPath !== file.path);
+        this.settings.processedFiles = this.settings.processedFiles.filter(processedPath => !this.areVaultPathsSame(processedPath, file.path));
         let changed = beforeProcessedCount !== this.settings.processedFiles.length;
         if (this.clearFailedFile(file.path)) changed = true;
         if (this.removeProtectedJob(file.path)) changed = true;
@@ -4579,13 +6242,13 @@ export default class BfmAutotagPlugin extends Plugin {
     }
 
     async processCompanionNoteAgain(notePath: string): Promise<void> {
-        const note = this.app.vault.getAbstractFileByPath(notePath);
-        if (!(note instanceof TFile) || note.extension.toLowerCase() !== "md" || !note.path.startsWith(this.settings.bfmNewFileLocation)) {
-            new Notice("Select a companion note inside the BFM New File Location.");
+        const note = this.getVaultFileByPathFlexible(notePath);
+        if (!(note instanceof TFile) || note.extension.toLowerCase() !== "md" || !this.isPathInBfmNewFileLocation(note.path)) {
+            new Notice("Select a companion note inside the Companion Note Folder.");
             return;
         }
         const file = this.findSourceFileForCompanionNote(note.path);
-        if (!(file instanceof TFile) || file.extension.toLowerCase() === "md" || !file.path.startsWith(this.settings.basePath)) {
+        if (!(file instanceof TFile) || file.extension.toLowerCase() === "md" || !this.isPathInBasePath(file.path)) {
             new Notice("Could not resolve the watched source file for that companion note.");
             return;
         }
@@ -4599,8 +6262,8 @@ export default class BfmAutotagPlugin extends Plugin {
     }
 
     async createCompanionNoteForSourceFile(path: string): Promise<void> {
-        const file = this.app.vault.getAbstractFileByPath(path);
-        if (!(file instanceof TFile) || file.extension.toLowerCase() === "md" || !file.path.startsWith(this.settings.basePath)) {
+        const file = this.getVaultFileByPathFlexible(path);
+        if (!(file instanceof TFile) || file.extension.toLowerCase() === "md" || !this.isPathInBasePath(file.path)) {
             new Notice("Select an image/source file inside the watched Base Path.");
             return;
         }
@@ -4616,8 +6279,8 @@ export default class BfmAutotagPlugin extends Plugin {
             return;
         }
 
-        const expectedNotePath = this.getBfmNotePath(file);
-        const createdNote = await this.createMissingBfmNoteWithRetry(file, expectedNotePath);
+        const expectedNotePath = this.getCompanionNotePath(file);
+        const createdNote = await this.createMissingCompanionNote(file, expectedNotePath);
         if (createdNote instanceof TFile) {
             await this.manualPairFilesImmediate(file.path, createdNote.path, false);
             new Notice(`Created companion note for ${file.name}.`);
@@ -4650,7 +6313,7 @@ export default class BfmAutotagPlugin extends Plugin {
                     if (note instanceof TFile) {
                         summary.existing += 1;
                     } else {
-                        note = await this.createMissingBfmNote(file, this.getBfmNotePath(file), false);
+                        note = await this.createMissingCompanionNote(file, this.getCompanionNotePath(file), false);
                         if (note instanceof TFile) {
                             summary.created += 1;
                         } else {
@@ -4664,7 +6327,7 @@ export default class BfmAutotagPlugin extends Plugin {
                 }
             } catch (error) {
                 summary.failed += 1;
-                console.warn("Maru\'s Autotag existing vault companion note backfill failed", file.path, error);
+                console.warn("Autotag existing vault companion note backfill failed", file.path, error);
             }
 
             onProgress?.(index + 1, files.length, summary);
@@ -4701,17 +6364,17 @@ export default class BfmAutotagPlugin extends Plugin {
     }
 
     async indexExistingVaultDuplicateProtection(): Promise<void> {
-        const files = this.getHashableBaseFiles();
+        const files = this.getUnprocessedFilesNeedingDuplicateIndex();
         const total = files.length;
         const totalSteps = Math.max(1, total * 2);
         const progress = this.showProgressNotice(
-            "Indexing existing vault files",
-            total > 0 ? `Checking companions 0/${total}` : "No source files found.",
+            "Indexing existing files",
+            total > 0 ? `Checking companions 0/${total}` : "No unprocessed files need indexing.",
             totalSteps
         );
 
         if (total === 0) {
-            progress.setProgress(1, "No source files found.");
+            progress.setProgress(1, "No unprocessed files need indexing.");
             window.setTimeout(() => progress.hide(), 1600);
             return;
         }
@@ -4723,7 +6386,7 @@ export default class BfmAutotagPlugin extends Plugin {
         const records: DuplicateRecord[] = [];
         let hashFailed = 0;
         let skippedWithoutCompanion = 0;
-        const shouldComputeVisualHash = this.settings.useDuplicateProtection && this.settings.duplicateDetectionMode === "exact-visual";
+        const shouldComputeVisualHash = this.settings.duplicateDetectionMode === "exact-visual";
 
         for (let index = 0; index < files.length; index += 1) {
             const file = files[index];
@@ -4739,7 +6402,7 @@ export default class BfmAutotagPlugin extends Plugin {
                         const exactHash = await this.computeExactHash(file);
                         const visualHash = shouldComputeVisualHash
                             ? await this.computeVisualHash(file).catch(error => {
-                                console.warn("Maru\'s Autotag existing vault visual hash failed", file.path, error);
+                                console.warn("Autotag existing vault visual hash failed", file.path, error);
                                 return undefined;
                             })
                             : undefined;
@@ -4754,48 +6417,58 @@ export default class BfmAutotagPlugin extends Plugin {
                 }
             } catch (error) {
                 hashFailed += 1;
-                console.warn("Maru\'s Autotag existing vault duplicate indexing failed", file.path, error);
+                console.warn("Autotag existing vault duplicate indexing failed", file.path, error);
             }
 
             progress.setProgress(total + index + 1, `Hashing ${index + 1}/${total}`);
             if ((index + 1) % 20 === 0) await this.sleep(1);
         }
 
-        this.settings.duplicateRecords = records;
+        const indexedPathKeys = new Set(records.map(record => this.getVaultPathKey(record.filePath)));
+        this.settings.duplicateRecords = [
+            ...this.getDuplicateRecords().filter(record => !indexedPathKeys.has(this.getVaultPathKey(record.filePath))),
+            ...records,
+        ];
         this.backfillPairRecordsFromDuplicateRecords();
         await this.saveSettings();
 
         const disabledNotice = this.isDuplicateProtectionActive()
             ? ""
-            : " Duplicate Protection is currently disabled; the index is saved and will be used after enabling it.";
-        const message = `Indexed ${records.length}/${total} file${total === 1 ? "" : "s"}. Created ${companionSummary.created} companion note${companionSummary.created === 1 ? "" : "s"}; skipped ${skippedWithoutCompanion} without companions; ${hashFailed} hash failure${hashFailed === 1 ? "" : "s"}.${disabledNotice}`;
+            : " Duplicate detection is currently off; the prepared hashes are saved and will be used after selecting a duplicate detection mode.";
+        const message = `Indexed ${records.length}/${total} unprocessed file${total === 1 ? "" : "s"} that needed indexing. Created ${companionSummary.created} companion note${companionSummary.created === 1 ? "" : "s"}; skipped ${skippedWithoutCompanion} without companions; ${hashFailed} hash failure${hashFailed === 1 ? "" : "s"}.${disabledNotice}`;
         progress.setProgress(totalSteps, message);
         window.setTimeout(() => progress.hide(), 2600);
         new Notice(message);
     }
 
-    applyBfmFormatCase(value: string, suffix: string | undefined): string {
-        if (suffix === "UP") return value.toUpperCase();
-        if (suffix === "LOW") return value.toLowerCase();
-        return value;
+    applyCompanionNameTokenCase(value: string, token: string, suffix: string | undefined, mode: CompanionNameCaseMode = "current"): string {
+        const normalizedSuffix = suffix?.toUpperCase();
+        if (normalizedSuffix === "UP") return value.toUpperCase();
+        if (normalizedSuffix === "LOW") return value.toLowerCase();
+        if (token === token.toUpperCase()) return value.toUpperCase();
+        if (/^[A-Z][a-z]+$/.test(token)) {
+            return mode === "legacy-title-lower" && value.length > 0
+                ? `${value.charAt(0).toUpperCase()}${value.slice(1).toLowerCase()}`
+                : value;
+        }
+        return value.toLowerCase();
     }
 
-    renderBfmFileNameFormat(file: TFile): string {
-        return this.renderBfmFileNameFormatFromParts(file.name, file.path, file.extension);
+    renderCompanionNoteNameFormat(file: TFile): string {
+        return this.renderCompanionNoteNameFormatFromParts(file.name, file.path, file.extension);
     }
 
-    renderBfmFileNameFormatFromParts(fileName: string, filePath: string, extension: string): string {
+    renderCompanionNoteNameFormatFromParts(fileName: string, filePath: string, extension: string, mode: CompanionNameCaseMode = "current"): string {
         const nameWithoutExt = fileName.replace(/\.[^/.]+$/, "");
         const link = `[[${filePath}]]`;
         const embed = `![[${filePath}]]`;
-        const format = this.settings.bfmFileNameFormat?.trim() || DEFAULT_SETTINGS.bfmFileNameFormat;
+        const format = this.getEffectiveCompanionNoteNameFormat();
 
-        const rendered = format.replace(/\{\{(NAME|FULLNAME|EXTENSION|PATH|LINK|EMBED)(?::(UP|LOW))?\}\}/gi, (_match, token: string, suffix: string | undefined) => {
+        const rendered = format.replace(/\{\{(name|filename|fullname|extension|path|link|embed)(?::(UP|LOW))?\}\}/gi, (_match, token: string, suffix: string | undefined) => {
             const normalizedToken = token.toUpperCase();
-            const normalizedSuffix = suffix?.toUpperCase();
             const value = normalizedToken === "NAME"
                 ? nameWithoutExt
-                : normalizedToken === "FULLNAME"
+                : normalizedToken === "FILENAME" || normalizedToken === "FULLNAME"
                     ? fileName
                     : normalizedToken === "EXTENSION"
                         ? extension
@@ -4805,39 +6478,53 @@ export default class BfmAutotagPlugin extends Plugin {
                                 ? link
                                 : embed;
 
-            return this.applyBfmFormatCase(value, normalizedSuffix);
+            if (normalizedToken === "PATH" || normalizedToken === "LINK" || normalizedToken === "EMBED") {
+                return value;
+            }
+            return this.applyCompanionNameTokenCase(value, token, suffix, mode);
         });
 
         return rendered.endsWith(".md") ? rendered : `${rendered}.md`;
     }
 
-    getBfmNoteNamesForFile(file: TFile): string[] {
-        return [this.renderBfmFileNameFormat(file)];
+    getCompanionNoteNamesForFile(file: TFile): string[] {
+        const names = new Set<string>([
+            this.renderCompanionNoteNameFormat(file),
+            this.renderCompanionNoteNameFormatFromParts(file.name, file.path, file.extension, "legacy-title-lower"),
+        ]);
+        const recentlyMovedFromPath = this.recentAutoMovedSourcePaths.get(file.path);
+        if (recentlyMovedFromPath) {
+            names.add(this.renderCompanionNoteNameFormatFromParts(file.name, recentlyMovedFromPath, file.extension));
+            names.add(this.renderCompanionNoteNameFormatFromParts(file.name, recentlyMovedFromPath, file.extension, "legacy-title-lower"));
+        }
+        return Array.from(names);
     }
 
-    getBfmConflictNoteNamesForFile(file: TFile): string[] {
-        const names = new Set<string>(this.getBfmNoteNamesForFile(file));
+    getCompanionConflictNoteNamesForFile(file: TFile): string[] {
+        const names = new Set<string>(this.getCompanionNoteNamesForFile(file));
         const extension = file.extension || (file.name.includes(".") ? file.name.split(".").pop() ?? "" : "");
         const nameWithoutExt = file.name.replace(/\.[^/.]+$/, "");
         const copyNumberMatch = nameWithoutExt.match(/^(.*)\s+\d+$/);
         if (copyNumberMatch) {
             const originalFileName = extension ? `${copyNumberMatch[1]}.${extension}` : copyNumberMatch[1];
-            names.add(this.renderBfmFileNameFormatFromParts(originalFileName, file.path.replace(file.name, originalFileName), extension));
+            names.add(this.renderCompanionNoteNameFormatFromParts(originalFileName, file.path.replace(file.name, originalFileName), extension));
+            names.add(this.renderCompanionNoteNameFormatFromParts(originalFileName, file.path.replace(file.name, originalFileName), extension, "legacy-title-lower"));
         }
         return Array.from(names);
     }
 
-    getBfmNotePath(file: TFile): string {
-        const bfmNoteName = this.renderBfmFileNameFormat(file);
-        return `${this.settings.bfmNewFileLocation}/${bfmNoteName}`;
+    getCompanionNotePath(file: TFile): string {
+        const companionNoteName = this.renderCompanionNoteNameFormat(file);
+        return `${this.getEffectiveCompanionNoteFolder()}/${companionNoteName}`;
     }
 
-    getBfmNoteCandidatePaths(file: TFile): string[] {
-        return this.getBfmNoteNamesForFile(file).map(name => `${this.settings.bfmNewFileLocation}/${name}`);
+    getCompanionNoteCandidatePaths(file: TFile): string[] {
+        const noteRoot = this.getEffectiveCompanionNoteFolder();
+        return this.getCompanionNoteNamesForFile(file).map(name => `${noteRoot}/${name}`);
     }
 
-    isBfmConflictNoteName(noteName: string, formattedNoteName: string): boolean {
-        return noteName.startsWith("CONFLICT-") && noteName.endsWith(`-${formattedNoteName}`);
+    isCompanionConflictNoteName(noteName: string, formattedNoteName: string): boolean {
+        return noteName.toLowerCase().startsWith("conflict-") && noteName.toLowerCase().endsWith(`-${formattedNoteName.toLowerCase()}`);
     }
 
     getLinkedPathFromCompanionNote(note: TFile): string | null {
@@ -4852,97 +6539,73 @@ export default class BfmAutotagPlugin extends Plugin {
     isCompanionCandidateValidForFile(note: TFile, file: TFile, pairId?: string): boolean {
         const owner = this.getPairRecordForNotePath(note.path);
         if (owner && pairId && owner.pairId !== pairId) return false;
-        if (owner && !pairId && owner.imagePath !== file.path) return false;
+        if (owner && !pairId && !this.areVaultPathsSame(owner.imagePath, file.path)) return false;
         const linkedPath = this.getLinkedPathFromCompanionNote(note);
-        if (linkedPath && linkedPath !== file.path) return false;
+        const recentlyMovedFromPath = this.recentAutoMovedSourcePaths.get(file.path);
+        if (
+            linkedPath
+            && !this.areVaultPathsSame(linkedPath, file.path)
+            && !this.areVaultPathsSame(linkedPath, recentlyMovedFromPath)
+        ) return false;
         return true;
     }
 
-    findBfmNoteVariant(file: TFile): TFile | null {
+    findCompanionNoteVariant(file: TFile): TFile | null {
         const activePair = this.getActiveRunPairForPath(file.path);
         const pairRecord = activePair ? this.getPairRecordById(activePair.pairId) : this.getPairRecordForImagePath(file.path);
         const pairId = activePair?.pairId ?? pairRecord?.pairId;
-        const existingPairNote = pairRecord?.notePath ? this.app.vault.getAbstractFileByPath(pairRecord.notePath) : null;
+        const existingPairNote = pairRecord?.notePath ? this.getVaultFileByPathFlexible(pairRecord.notePath) : null;
         if (existingPairNote instanceof TFile && this.isCompanionCandidateValidForFile(existingPairNote, file, pairId)) {
             return existingPairNote;
         }
 
-        const candidateNames = new Set(this.getBfmConflictNoteNamesForFile(file));
+        const candidateNames = new Set(this.getCompanionConflictNoteNamesForFile(file));
+        const noteRoot = this.getEffectiveCompanionNoteFolder();
         const notes = this.app.vault.getMarkdownFiles()
-            .filter(note => note.path.startsWith(`${this.settings.bfmNewFileLocation}/`));
+            .filter(note => this.isPathInsideVaultFolder(note.path, noteRoot));
         const conflictNote = notes.find(note => {
             for (const candidateName of candidateNames) {
-                if (this.isBfmConflictNoteName(note.name, candidateName) && this.isCompanionCandidateValidForFile(note, file, pairId)) return true;
+                if (this.isCompanionConflictNoteName(note.name, candidateName) && this.isCompanionCandidateValidForFile(note, file, pairId)) return true;
             }
             return false;
         });
         if (conflictNote instanceof TFile) return conflictNote;
 
-        const candidatePaths = new Set(this.getBfmNoteCandidatePaths(file));
+        const candidatePaths = new Set(this.getCompanionNoteCandidatePaths(file));
         for (const candidatePath of candidatePaths) {
-            const note = this.app.vault.getAbstractFileByPath(candidatePath);
+            const note = this.getVaultFileByPathFlexible(candidatePath);
             if (note instanceof TFile && this.isCompanionCandidateValidForFile(note, file, pairId)) return note;
         }
 
-        return notes.find(note => {
-            for (const candidateName of candidateNames) {
-                if (note.name === candidateName && this.isCompanionCandidateValidForFile(note, file, pairId)) return true;
-            }
-            return false;
-        }) ?? null;
+        const normalizedCandidateNames = new Set(Array.from(candidateNames).map(name => name.toLowerCase()));
+        return notes.find(note =>
+            normalizedCandidateNames.has(note.name.toLowerCase())
+            && this.isCompanionCandidateValidForFile(note, file, pairId)
+        ) ?? null;
     }
-    doesBfmNotePathMatchFile(notePath: string, file: TFile): boolean {
+    doesCompanionNotePathMatchFile(notePath: string, file: TFile): boolean {
         const noteName = notePath.split("/").pop() ?? notePath;
-        const exactNames = this.getBfmNoteNamesForFile(file);
-        if (exactNames.some(candidateName => notePath === `${this.settings.bfmNewFileLocation}/${candidateName}` || noteName === candidateName)) {
+        const exactNames = this.getCompanionNoteNamesForFile(file);
+        const noteRoot = this.getEffectiveCompanionNoteFolder();
+        if (exactNames.some(candidateName =>
+            this.areVaultPathsSame(notePath, `${noteRoot}/${candidateName}`)
+            || noteName.toLowerCase() === candidateName.toLowerCase()
+        )) {
             return true;
         }
-        return this.getBfmConflictNoteNamesForFile(file).some(candidateName => this.isBfmConflictNoteName(noteName, candidateName));
-    }
-
-    async waitForBfmNote(file: TFile, expectedNotePath: string): Promise<TFile | null> {
-        const deadline = Date.now() + this.settings.bfmNoteMaxWaitMs;
-        const pollInterval = Math.max(100, this.settings.bfmNotePollIntervalMs);
-
-        while (Date.now() < deadline) {
-            const note = this.findBfmNoteVariant(file);
-            if (note instanceof TFile) {
-                if (note.path !== expectedNotePath) {
-                    console.log("Maru\'s Autotag resolved companion note variant:", { expectedNotePath, resolvedNotePath: note.path });
-                }
-                return note;
-            }
-
-            const remaining = deadline - Date.now();
-            if (remaining <= 0) {
-                break;
-            }
-
-            await this.sleep(Math.min(pollInterval, remaining));
-        }
-
-        return null;
-    }
-    showCompanionRetryNotice(): void {
-        const fragment = document.createDocumentFragment();
-        const wrapper = fragment.createDiv({ cls: "bfm-autotag-retry-notice" });
-        wrapper.createDiv({ cls: "bfm-autotag-retry-spinner" });
-        const text = wrapper.createDiv({ cls: "bfm-autotag-retry-text" });
-        text.createDiv({ text: "Companion note not found", cls: "bfm-autotag-retry-title" });
-        text.createDiv({ text: "Retrying...", cls: "bfm-autotag-retry-subtitle" });
-        new Notice(fragment, this.settings.bfmNoteMaxWaitMs);
+        return this.getCompanionConflictNoteNamesForFile(file).some(candidateName => this.isCompanionConflictNoteName(noteName, candidateName));
     }
 
     showProgressNotice(title: string, subtitle: string, total: number, showBar = true): ProgressNoticeController {
         const fragment = document.createDocumentFragment();
-        const wrapper = fragment.createDiv({ cls: "bfm-autotag-progress-notice" });
-        const header = wrapper.createDiv({ cls: "bfm-autotag-progress-header" });
-        header.createDiv({ cls: "bfm-autotag-progress-spinner" });
-        const text = header.createDiv({ cls: "bfm-autotag-progress-text" });
-        text.createDiv({ text: title, cls: "bfm-autotag-progress-title" });
-        const subtitleEl = text.createDiv({ cls: "bfm-autotag-progress-subtitle" });
+        const wrapper = fragment.createDiv({ cls: "autotag-progress-notice" });
+        const header = wrapper.createDiv({ cls: "autotag-progress-header" });
+        header.createDiv({ cls: "autotag-progress-spinner" });
+        const text = header.createDiv({ cls: "autotag-progress-text" });
+        text.createDiv({ text: title, cls: "autotag-progress-title" });
+        const subtitleEl = text.createDiv({ cls: "autotag-progress-subtitle" });
         const fill = showBar
-            ? wrapper.createDiv({ cls: "bfm-autotag-progress-bar" }).createDiv({ cls: "bfm-autotag-progress-fill" })
+            ? wrapper.createDiv({ cls: "autotag-progress-bar" }).createDiv({ cls: "autotag-progress-fill" })
             : null;
         const notice = new Notice(fragment, 0) as Notice & { hide?: () => void };
         const safeTotal = Math.max(1, total);
@@ -4953,7 +6616,7 @@ export default class BfmAutotagPlugin extends Plugin {
                 return;
             }
             subtitleEl.createSpan({ text: value.slice(0, -3).trimEnd() });
-            const dotsEl = subtitleEl.createSpan({ cls: "bfm-autotag-loading-dots" });
+            const dotsEl = subtitleEl.createSpan({ cls: "autotag-loading-dots" });
             [0, 1, 2].forEach(() => dotsEl.createSpan({ text: "." }));
         };
         setSubtitle(subtitle);
@@ -4993,23 +6656,23 @@ export default class BfmAutotagPlugin extends Plugin {
         this.processingQueue.forEach((_item, path) => paths.add(path));
         this.currentRunIds.forEach((_runId, path) => paths.add(path));
         this.settings.protectedJobs.forEach(job => {
-            if (!this.settings.processedFiles.includes(job.path)) paths.add(job.path);
+            if (!this.settings.processedFiles.some(processedPath => this.areVaultPathsSame(processedPath, job.path))) paths.add(job.path);
         });
         return Array.from(paths);
     }
 
     getActiveProcessingImageFiles(): TFile[] {
         return Array.from(this.activeWorkerPaths)
-            .map(path => this.app.vault.getAbstractFileByPath(path))
+            .map(path => this.getVaultFileByPathFlexible(path))
             .filter((file): file is TFile => file instanceof TFile && file.extension.toLowerCase() !== "md");
     }
 
     getQueuedProcessingImageCount(): number {
-        const activePaths = new Set(this.activeWorkerPaths);
+        const activePaths = new Set(Array.from(this.activeWorkerPaths).map(path => this.getVaultPathKey(path)));
         return this.getUniqueProcessingPaths()
-            .filter(path => !activePaths.has(path))
+            .filter(path => !activePaths.has(this.getVaultPathKey(path)))
             .filter(path => {
-                const file = this.app.vault.getAbstractFileByPath(path);
+                const file = this.getVaultFileByPathFlexible(path);
                 return file instanceof TFile && file.extension.toLowerCase() !== "md";
             })
             .length;
@@ -5102,16 +6765,12 @@ export default class BfmAutotagPlugin extends Plugin {
         progress.hide();
     }
 
-    async waitForBfmNoteWithRetry(file: TFile, expectedNotePath: string): Promise<TFile | null> {
-        const first = await this.waitForBfmNote(file, expectedNotePath);
-        if (first instanceof TFile) return first;
-
-        this.showCompanionRetryNotice();
-        return this.waitForBfmNote(file, expectedNotePath);
-    }
-
     buildFolderMetadata(filePath: string): {
         folderCandidateValues: string[];
+        folderStrongCandidateValues: string[];
+        folderConsiderCandidateValues: string[];
+        folderExcludedCandidateValues: string[];
+        folderGeneratedValues: string[];
         folderPropertyItems: Record<string, string[]>;
         wikiLink: string;
         embedLink: string;
@@ -5128,8 +6787,15 @@ export default class BfmAutotagPlugin extends Plugin {
 
         const folderPropertyItems: Record<string, string[]> = {};
         const folderCandidateValues: string[] = [];
+        const folderStrongCandidateValues: string[] = [];
+        const folderConsiderCandidateValues: string[] = [];
+        const folderExcludedCandidateValues: string[] = [];
+        const folderGeneratedValues: string[] = [];
         const fallbackProperty = this.normalizeFolderFallbackProperty(this.settings.folderFallbackProperty);
-        const addFolderValue = (property: string, value: string, format: string | undefined, useAsAiCandidate: boolean) => {
+        const addUnique = (values: string[], value: string) => {
+            if (!values.includes(value)) values.push(value);
+        };
+        const addFolderValue = (property: string, value: string, format: string | undefined, aiCandidateMode: CandidateMode) => {
             const normalizedProperty = this.normalizeFolderFallbackProperty(property);
             const item = this.formatYamlListItem(value, format);
             const items = folderPropertyItems[normalizedProperty] ?? [];
@@ -5138,8 +6804,15 @@ export default class BfmAutotagPlugin extends Plugin {
             }
             folderPropertyItems[normalizedProperty] = items;
 
-            if (useAsAiCandidate && !folderCandidateValues.includes(value)) {
-                folderCandidateValues.push(value);
+            addUnique(folderGeneratedValues, value);
+            if (aiCandidateMode === "all") {
+                addUnique(folderStrongCandidateValues, value);
+                addUnique(folderCandidateValues, value);
+            } else if (aiCandidateMode === "consider") {
+                addUnique(folderConsiderCandidateValues, value);
+                addUnique(folderCandidateValues, value);
+            } else if (aiCandidateMode === "exclude") {
+                addUnique(folderExcludedCandidateValues, value);
             }
         };
 
@@ -5151,6 +6824,10 @@ export default class BfmAutotagPlugin extends Plugin {
         if (!this.settings.useFolderTags) {
             return {
                 folderCandidateValues: [],
+                folderStrongCandidateValues: [],
+                folderConsiderCandidateValues: [],
+                folderExcludedCandidateValues: [],
+                folderGeneratedValues: [],
                 folderPropertyItems,
                 wikiLink,
                 embedLink,
@@ -5162,18 +6839,22 @@ export default class BfmAutotagPlugin extends Plugin {
             let matchedPropertyList = false;
             this.getFolderPropertyMappings().forEach(mapping => {
                 if (mapping.property && mapping.values.includes(part)) {
-                    addFolderValue(mapping.property, part, mapping.format, mapping.useAsAiCandidate);
+                    addFolderValue(mapping.property, part, mapping.format, this.getFolderMappingAiCandidateMode(mapping));
                     matchedPropertyList = true;
                 }
             });
 
             if (!matchedPropertyList) {
-                addFolderValue(fallbackProperty, part, this.settings.folderFallbackFormat, this.settings.folderFallbackUseAsAiCandidate);
+                addFolderValue(fallbackProperty, part, this.settings.folderFallbackFormat, this.getFolderFallbackAiCandidateMode());
             }
         });
 
         return {
             folderCandidateValues,
+            folderStrongCandidateValues,
+            folderConsiderCandidateValues,
+            folderExcludedCandidateValues,
+            folderGeneratedValues,
             folderPropertyItems,
             wikiLink,
             embedLink,
@@ -5221,24 +6902,103 @@ export default class BfmAutotagPlugin extends Plugin {
         if (!Array.isArray(mappings)) return [];
 
         return mappings
-            .map((mapping, index) => {
+            .map((mapping, index): FolderPropertyMapping => {
                 const raw = mapping as Partial<FolderPropertyMapping>;
                 const property = this.normalizeFolderFallbackProperty(raw.property);
                 const values = Array.isArray(raw.values)
                     ? raw.values.map(value => String(value).trim()).filter(Boolean)
                     : [];
                 const uniqueValues = Array.from(new Set(values));
+                const valueSource: FolderPropertyValueSource = raw.valueSource === "automatic" ? "automatic" : "manual";
+                const aiCandidateMode = this.normalizeCandidateMode(
+                    raw.aiCandidateMode,
+                    raw.useAsAiCandidate === false ? "disabled" : "all"
+                );
 
                 return {
                     id: typeof raw.id === "string" && raw.id.trim() ? raw.id : `${Date.now()}-${index}`,
                     property,
                     values: uniqueValues,
+                    valueSource,
                     format: typeof raw.format === "string" ? raw.format : "",
-                    useAsAiCandidate: raw.useAsAiCandidate !== false,
-                    useAsVaultCandidate: raw.useAsVaultCandidate !== false,
+                    aiCandidateMode,
+                    useAsAiCandidate: aiCandidateMode === "all" || aiCandidateMode === "consider",
+                    useAsVaultCandidate: raw.useAsVaultCandidate === true,
                 };
             })
             .filter(mapping => mapping.property.length > 0);
+    }
+
+    getFolderPropertyManualMemoryKey(property: string | undefined): string {
+        return (property ?? "")
+            .trim()
+            .replace(/\s+/g, "-")
+            .toLowerCase();
+    }
+
+    normalizeManualFolderPropertyValues(values: unknown): string[] {
+        if (!Array.isArray(values)) return [];
+        const seen = new Set<string>();
+        const normalizedValues: string[] = [];
+        values.forEach(value => {
+            const normalized = String(value).trim();
+            const key = normalized.toLowerCase();
+            if (!normalized || seen.has(key)) return;
+            seen.add(key);
+            normalizedValues.push(normalized);
+        });
+        return normalizedValues;
+    }
+
+    parseManualFolderPropertyValueInput(value: string): string[] {
+        return this.normalizeManualFolderPropertyValues(value.split(","));
+    }
+
+    normalizeFolderPropertyManualValueMemory(memory: unknown): Record<string, string[]> {
+        const normalized: Record<string, string[]> = {};
+        if (!memory || typeof memory !== "object" || Array.isArray(memory)) return normalized;
+
+        Object.entries(memory as Record<string, unknown>).forEach(([property, values]) => {
+            const key = this.getFolderPropertyManualMemoryKey(property);
+            if (!key) return;
+            normalized[key] = this.normalizeManualFolderPropertyValues(values);
+        });
+        return normalized;
+    }
+
+    rememberFolderPropertyManualValues(property: string | undefined, values: string[]): void {
+        const key = this.getFolderPropertyManualMemoryKey(property);
+        if (!key) return;
+        this.settings.folderPropertyManualValueMemory = this.normalizeFolderPropertyManualValueMemory(
+            this.settings.folderPropertyManualValueMemory
+        );
+        this.settings.folderPropertyManualValueMemory[key] = this.normalizeManualFolderPropertyValues(values);
+    }
+
+    getRememberedFolderPropertyManualValues(property: string | undefined): string[] | null {
+        const key = this.getFolderPropertyManualMemoryKey(property);
+        if (!key) return null;
+        const memory = this.settings.folderPropertyManualValueMemory ?? {};
+        if (!Object.prototype.hasOwnProperty.call(memory, key)) return null;
+        return [...this.normalizeManualFolderPropertyValues(memory[key])];
+    }
+
+    rememberManualFolderPropertyValuesFromMappings(): void {
+        const mergedMemory = this.normalizeFolderPropertyManualValueMemory(this.settings.folderPropertyManualValueMemory);
+        const valuesByProperty = new Map<string, string[]>();
+        this.settings.folderPropertyMappings.forEach(mapping => {
+            if (mapping.valueSource !== "manual") return;
+            const key = this.getFolderPropertyManualMemoryKey(mapping.property);
+            if (!key) return;
+            valuesByProperty.set(key, [
+                ...(valuesByProperty.get(key) ?? []),
+                ...this.normalizeManualFolderPropertyValues(mapping.values),
+            ]);
+        });
+        valuesByProperty.forEach((values, key) => {
+            mergedMemory[key] = this.normalizeManualFolderPropertyValues(values);
+        });
+        this.settings.folderPropertyManualValueMemory = mergedMemory;
     }
 
     getFolderPropertyMappings(): FolderPropertyMapping[] {
@@ -5326,6 +7086,161 @@ export default class BfmAutotagPlugin extends Plugin {
         };
     }
 
+    normalizeVaultFolderPath(path: string | null | undefined): string {
+        return (path ?? "").trim().replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+    }
+
+    normalizeVaultPath(path: string | null | undefined): string {
+        return (path ?? "").trim().replace(/\\/g, "/").replace(/^\/+|\/+$/g, "").replace(/\/+/g, "/");
+    }
+
+    getVaultPathKey(path: string | null | undefined): string {
+        return this.normalizeVaultPath(path).toLowerCase();
+    }
+
+    areVaultPathsSame(pathA: string | null | undefined, pathB: string | null | undefined): boolean {
+        const keyA = this.getVaultPathKey(pathA);
+        const keyB = this.getVaultPathKey(pathB);
+        return !!keyA && !!keyB && keyA === keyB;
+    }
+
+    hasPathKey<T>(map: Map<string, T>, path: string): boolean {
+        if (map.has(path)) return true;
+        const pathKey = this.getVaultPathKey(path);
+        for (const existingPath of map.keys()) {
+            if (this.getVaultPathKey(existingPath) === pathKey) return true;
+        }
+        return false;
+    }
+
+    getPathKeyValue<T>(map: Map<string, T>, path: string): T | undefined {
+        const exact = map.get(path);
+        if (exact !== undefined) return exact;
+        const pathKey = this.getVaultPathKey(path);
+        for (const [existingPath, value] of map.entries()) {
+            if (this.getVaultPathKey(existingPath) === pathKey) return value;
+        }
+        return undefined;
+    }
+
+    deletePathKey<T>(map: Map<string, T>, path: string): boolean {
+        let deleted = map.delete(path);
+        const pathKey = this.getVaultPathKey(path);
+        for (const existingPath of Array.from(map.keys())) {
+            if (this.getVaultPathKey(existingPath) === pathKey) {
+                map.delete(existingPath);
+                deleted = true;
+            }
+        }
+        return deleted;
+    }
+
+    getVaultAbstractFileByPathFlexible(path: string | null | undefined): TFile | TFolder | null {
+        const normalizedPath = this.normalizeVaultPath(path);
+        if (!normalizedPath) return null;
+        const exact = this.app.vault.getAbstractFileByPath(normalizedPath);
+        if (exact instanceof TFile || exact instanceof TFolder) return exact;
+
+        const pathKey = this.getVaultPathKey(normalizedPath);
+        const match = this.app.vault.getAllLoadedFiles()
+            .find(file => (file instanceof TFile || file instanceof TFolder) && this.getVaultPathKey(file.path) === pathKey);
+        return match instanceof TFile || match instanceof TFolder ? match : null;
+    }
+
+    getVaultFileByPathFlexible(path: string | null | undefined): TFile | null {
+        const file = this.getVaultAbstractFileByPathFlexible(path);
+        return file instanceof TFile ? file : null;
+    }
+
+    getEffectiveBasePath(): string {
+        return this.normalizeVaultFolderPath(this.settings.basePath) || DEFAULT_SETTINGS.basePath;
+    }
+
+    isPathInsideVaultFolder(path: string, folderPath: string): boolean {
+        const normalizedFolder = this.normalizeVaultFolderPath(folderPath);
+        if (!normalizedFolder) return false;
+        const pathKey = this.getVaultPathKey(path);
+        const folderKey = this.getVaultPathKey(normalizedFolder);
+        return pathKey === folderKey || pathKey.startsWith(`${folderKey}/`);
+    }
+
+    isPathInBasePath(path: string): boolean {
+        return this.isPathInsideVaultFolder(path, this.getEffectiveBasePath());
+    }
+
+    isPathInBfmNewFileLocation(path: string): boolean {
+        return this.isPathInsideVaultFolder(path, this.getEffectiveCompanionNoteFolder());
+    }
+
+    getEffectiveCompanionNoteFolder(): string {
+        return this.normalizeVaultFolderPath(this.settings.companionNoteFolder) || DEFAULT_SETTINGS.companionNoteFolder;
+    }
+
+    getEffectiveCompanionNoteNameFormat(): string {
+        return this.settings.companionNoteNameFormat?.trim() || DEFAULT_SETTINGS.companionNoteNameFormat;
+    }
+
+    getTemplateFilePath(): string | null {
+        const normalized = this.normalizeVaultPath(this.settings.templateFilePath);
+        return normalized || null;
+    }
+
+    getTemplateFileUnavailableMessage(): string | null {
+        if (this.settings.templateSource !== "template-file") return null;
+        const templatePath = this.getTemplateFilePath();
+        if (!templatePath) return "No template file selected.";
+        const file = this.getVaultFileByPathFlexible(templatePath);
+        return file instanceof TFile ? null : `Template file not found: ${templatePath}`;
+    }
+
+    isTemplateSourceAvailable(): boolean {
+        return this.getTemplateFileUnavailableMessage() === null;
+    }
+
+    getFrontmatterTextFromTemplateContent(content: string): string {
+        const normalized = content.replace(/\r\n/g, "\n");
+        const match = normalized.match(/^---\n([\s\S]*?)\n---(?:\n|$)/);
+        return match ? match[1] : normalized;
+    }
+
+    getFrontmatterTextFromCachedTemplateFile(file: TFile): string | null {
+        const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
+        if (!frontmatter) return null;
+        const properties = Object.keys(frontmatter)
+            .map(property => property.trim())
+            .filter(Boolean);
+        return properties.length > 0 ? properties.map(property => `${property}:`).join("\n") : null;
+    }
+
+    getTemplateFileContent(): string | null {
+        const templatePath = this.getTemplateFilePath();
+        if (!templatePath) return null;
+        const file = this.getVaultFileByPathFlexible(templatePath);
+        if (!(file instanceof TFile)) return null;
+
+        const fullPath = this.getFullVaultPath(file.path);
+        if (fullPath) {
+            try {
+                const fs = require("fs") as typeof import("fs");
+                return fs.readFileSync(fullPath, "utf8");
+            } catch (error) {
+                console.warn("Autotag could not read template file.", error);
+            }
+        }
+
+        return null;
+    }
+
+    getTemplateFileFrontmatterText(): string | null {
+        const templatePath = this.getTemplateFilePath();
+        if (!templatePath) return null;
+        const file = this.getVaultFileByPathFlexible(templatePath);
+        if (!(file instanceof TFile)) return null;
+        const templateContent = this.getTemplateFileContent();
+        if (templateContent !== null) return this.getFrontmatterTextFromTemplateContent(templateContent);
+        return this.getFrontmatterTextFromCachedTemplateFile(file);
+    }
+
     getFrontmatterTemplateProperties(): string[] {
         return this.getFrontmatterTemplate().order;
     }
@@ -5348,6 +7263,30 @@ export default class BfmAutotagPlugin extends Plugin {
             generated.push(this.getAiDescriptionPropertyName());
         }
         if (this.settings.vaultAwarenessOutputEnabled) {
+            generated.push(this.getVaultAwarenessOutputPropertyName());
+        }
+
+        return Array.from(new Set(generated));
+    }
+
+    getActiveTemplateSuggestionGeneratedProperties(): string[] {
+        const generated: string[] = [];
+        if (this.settings.linkToFilePropertyEnabled) {
+            generated.push(this.getLinkToFilePropertyName());
+        }
+        if (this.settings.fileTypePropertyEnabled) {
+            generated.push(this.getFileTypePropertyName());
+        }
+        if (this.settings.embedPropertyEnabled) {
+            generated.push(this.getEmbedPropertyName());
+        }
+        if ((this.settings.aiTaggingEnabled || this.canRunDirectBridgeOutput()) && this.settings.aiTagsPropertyEnabled) {
+            generated.push(this.getAiTagsPropertyName());
+        }
+        if (this.settings.aiTaggingEnabled && this.settings.aiDescriptionPropertyEnabled) {
+            generated.push(this.getAiDescriptionPropertyName());
+        }
+        if (this.settings.aiTaggingEnabled && this.settings.vaultAwarenessEnabled && this.settings.vaultAwarenessOutputEnabled) {
             generated.push(this.getVaultAwarenessOutputPropertyName());
         }
 
@@ -5393,22 +7332,12 @@ export default class BfmAutotagPlugin extends Plugin {
     }
 
     getGeneratedPropertyNames(): Set<string> {
-        return new Set([
-            DEFAULT_SETTINGS.linkToFilePropertyName,
-            DEFAULT_SETTINGS.fileTypePropertyName,
-            DEFAULT_SETTINGS.embedPropertyName,
-            "aitags",
-            DEFAULT_SETTINGS.aiTagsPropertyName,
-            DEFAULT_SETTINGS.aiDescriptionPropertyName,
-            this.getLinkToFilePropertyName(),
-            this.getFileTypePropertyName(),
-            this.getEmbedPropertyName(),
-            this.getAiTagsPropertyName(),
-            this.getAiDescriptionPropertyName(),
-            DEFAULT_SETTINGS.vaultAwarenessOutputPropertyName,
-            this.getVaultAwarenessOutputPropertyName(),
-            ...this.getGeolocationPropertyNames(),
-        ]);
+        const properties = new Set<string>();
+        this.getEnabledGeneratedFrontmatterProperties().forEach(property => properties.add(property));
+        if (this.settings.geolocationEnabled) {
+            this.getGeolocationPropertyNames().forEach(property => properties.add(property));
+        }
+        return properties;
     }
 
     getGeolocationPropertyNames(): string[] {
@@ -5513,7 +7442,10 @@ ${mapping.property}`;
     }
 
     queueGeocodeJob(imagePath: string, notePath: string, coordinates: GpsCoordinates, reason: string, attempts = 0): void {
-        const existing = this.settings.pendingGeocodeJobs.find(job => job.imagePath === imagePath && job.notePath === notePath);
+        const existing = this.settings.pendingGeocodeJobs.find(job =>
+            this.areVaultPathsSame(job.imagePath, imagePath)
+            && this.areVaultPathsSame(job.notePath, notePath)
+        );
         const nextAttempts = attempts + 1;
         const nextTryAt = Date.now() + this.getGeocodeBackoffMs(nextAttempts);
         const job: PendingGeocodeJob = {
@@ -5527,7 +7459,9 @@ ${mapping.property}`;
             lastError: reason,
         };
         this.settings.pendingGeocodeJobs = [
-            ...this.settings.pendingGeocodeJobs.filter(candidate => !(candidate.imagePath === imagePath && candidate.notePath === notePath)),
+            ...this.settings.pendingGeocodeJobs.filter(candidate =>
+                !(this.areVaultPathsSame(candidate.imagePath, imagePath) && this.areVaultPathsSame(candidate.notePath, notePath))
+            ),
             job,
         ];
         const minutes = Math.max(1, Math.round((nextTryAt - Date.now()) / 60000));
@@ -5557,7 +7491,7 @@ ${mapping.property}`;
             method: "GET",
             headers: {
                 "Accept": "application/json",
-                "User-Agent": "marus-autotag Obsidian Plugin (personal geolocation lookup)",
+                "User-Agent": "autotag Obsidian Plugin (personal geolocation lookup)",
             },
             throw: false,
         });
@@ -5669,28 +7603,6 @@ ${mapping.property}`;
         return null;
     }
 
-    shouldCreateMissingCompanionNote(_path: string): boolean {
-        return this.settings.createMissingCompanionNote;
-    }
-
-    shouldDeleteLonelyFileWithoutCompanion(_path: string): boolean {
-        return this.settings.deleteLonelyFileWithoutCompanion;
-    }
-
-    async deleteLonelyFileWithoutCompanion(file: TFile, runId?: string): Promise<void> {
-        const filePath = file.path;
-        await this.deleteFileWithoutLinkedCascade(file, runId);
-        this.settings.lonelyDeletedImageCount += 1;
-        this.clearFailedFile(filePath);
-        this.removeDuplicateRecordsForPath(filePath);
-        this.cleanupProcessingStateForPath(filePath, runId);
-        this.markDuplicateProcessingComplete(filePath, runId);
-        this.removeProtectedJob(filePath);
-        if (this.isCurrentRun(filePath, runId ?? "")) this.currentRunIds.delete(filePath);
-        await this.saveSettings();
-        new Notice("Maru\'s Autotag deleted lonely image without companion note: " + file.name);
-    }
-
     async ensureVaultFolder(folderPath: string): Promise<void> {
         const normalized = folderPath.replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
         if (!normalized) return;
@@ -5698,55 +7610,96 @@ ${mapping.property}`;
         let current = "";
         for (const part of parts) {
             current = current ? current + "/" + part : part;
-            const existing = this.app.vault.getAbstractFileByPath(current);
+            const existing = this.getVaultAbstractFileByPathFlexible(current);
             if (existing instanceof TFolder) continue;
             if (existing) throw new Error("Cannot create folder because a file exists at " + current);
             await this.app.vault.createFolder(current);
         }
     }
 
-    async createMissingBfmNote(file: TFile, expectedNotePath: string, showNotice = true): Promise<TFile | null> {
-        const existing = this.findBfmNoteVariant(file);
-        if (existing instanceof TFile) return existing;
+    async resolveCreatedCompanionNote(expectedNotePath: string, created: TFile | null = null): Promise<TFile | null> {
+        const resolve = () => {
+            const createdFile = created instanceof TFile
+                ? this.getVaultFileByPathFlexible(created.path)
+                : null;
+            if (createdFile instanceof TFile) return createdFile;
 
+            const expectedFile = this.getVaultFileByPathFlexible(expectedNotePath);
+            return expectedFile instanceof TFile ? expectedFile : null;
+        };
+
+        const immediate = resolve();
+        if (immediate instanceof TFile) return immediate;
+
+        for (const delayMs of [150, 350]) {
+            await this.sleep(delayMs);
+            const resolved = resolve();
+            if (resolved instanceof TFile) return resolved;
+        }
+
+        return null;
+    }
+
+    async createMissingCompanionNote(file: TFile, expectedNotePath: string, showNotice = true): Promise<TFile | null> {
         const folderPath = expectedNotePath.split("/").slice(0, -1).join("/");
         await this.ensureVaultFolder(folderPath);
-
-        const currentExisting = this.app.vault.getAbstractFileByPath(expectedNotePath);
-        if (currentExisting instanceof TFile) return currentExisting;
-        if (currentExisting) throw new Error("Cannot create companion note because a folder exists at " + expectedNotePath);
 
         const templateText = this.settings.templateSource === "internal"
             ? (this.settings.frontmatterTemplate ?? "").trim().replace(/^---\s*\n?/, "").replace(/\n?---$/, "").trim()
             : "";
-        const initialContent = templateText ? "---\n" + templateText + "\n---\n" : "---\n---\n";
-        const created = await this.app.vault.create(expectedNotePath, initialContent);
-        if (showNotice) new Notice("Maru\'s Autotag created missing companion note: " + created.name);
-        return created;
-    }
-    async createMissingBfmNoteWithRetry(file: TFile, expectedNotePath: string): Promise<TFile | null> {
-        for (let attempt = 0; attempt < 2; attempt += 1) {
+        const templateFileContent = this.settings.templateSource === "template-file"
+            ? this.getTemplateFileContent()
+            : null;
+        const initialContent = templateFileContent
+            ? templateFileContent
+            : templateText ? "---\n" + templateText + "\n---\n" : "---\n---\n";
+
+        const retries = this.clampSetting(
+            this.settings.companionNoteCreationRetries,
+            DEFAULT_SETTINGS.companionNoteCreationRetries,
+            0,
+            5
+        );
+        let lastError: unknown = null;
+
+        for (let attempt = 0; attempt <= retries; attempt += 1) {
             try {
-                const created = await this.createMissingBfmNote(file, expectedNotePath);
-                if (created instanceof TFile) return created;
+                const created = await this.app.vault.create(expectedNotePath, initialContent);
+                const verified = await this.resolveCreatedCompanionNote(expectedNotePath, created);
+                if (verified instanceof TFile) {
+                    if (showNotice) new Notice("Autotag created companion note: " + verified.name);
+                    return verified;
+                }
+                lastError = new Error(`Companion note creation was not verified: ${expectedNotePath}`);
             } catch (error) {
-                console.warn("Maru\'s Autotag missing companion note creation failed", file.path, error);
+                const expectedExisting = this.getVaultAbstractFileByPathFlexible(expectedNotePath);
+                if (expectedExisting instanceof TFile) return expectedExisting;
+                if (expectedExisting) throw new Error("Cannot create companion note because a folder exists at " + expectedNotePath);
+
+                const existingVariant = this.findCompanionNoteVariant(file);
+                if (existingVariant instanceof TFile) return existingVariant;
+
+                lastError = error;
             }
 
-            if (attempt === 0) {
-                this.showCompanionRetryNotice();
-                const note = await this.waitForBfmNote(file, expectedNotePath);
-                if (note instanceof TFile) return note;
+            if (attempt < retries) {
+                await this.sleep(this.getRetryWaitMs(attempt + 1));
             }
         }
 
-        return this.waitForBfmNote(file, expectedNotePath);
+        console.warn("Autotag could not verify companion note creation after retries.", {
+            file: file.path,
+            expectedNotePath,
+            retries,
+            error: lastError instanceof Error ? lastError.message : String(lastError ?? "unknown error"),
+        });
+        return null;
     }
 
     async getImageGeolocationContext(file: TFile, notePath: string): Promise<ImageGeolocationContext | null> {
         if (!this.settings.geolocationEnabled) return null;
         const coordinates = await this.readGpsCoordinates(file).catch(error => {
-            console.warn("Maru\'s Autotag GPS metadata read failed", file.path, error);
+            console.warn("Autotag GPS metadata read failed", file.path, error);
             return null;
         });
         if (!coordinates) return null;
@@ -5814,6 +7767,11 @@ ${mapping.property}`;
             displayLocation ? `Known location metadata: ${displayLocation}` : "",
             `GPS coordinates: ${coordinateParts.join(", ")}`,
         ].filter(Boolean).join(". ");
+    }
+
+    formatGeolocationContextForAiTags(context: ImageGeolocationContext | null): string {
+        if (!this.settings.useGeolocationForAiTags) return "";
+        return this.formatGeolocationContextForDescription(context);
     }
 
     appendGeolocationContextToDescription(aiDescription: string, contextText: string): string {
@@ -5906,19 +7864,50 @@ ${mapping.property}`;
         return normalized;
     }
 
+    isSpeculativeImageCodeSentence(sentence: string): boolean {
+        const text = sentence.trim();
+        if (!text) return false;
+
+        const hasCodeLikeToken = /\b[a-z]{1,8}[_-]?\d{3,}[a-z0-9_-]*\b/i.test(text)
+            || /\b[a-f0-9]{10,}\b/i.test(text);
+        if (!hasCodeLikeToken) return false;
+
+        const mentionsUnsupportedIdentifier = /\b(?:image|photo|picture|file)?\s*(?:code|identifier|id)\b/i.test(text)
+            || /\b(?:code|identifier|id)\b/i.test(text);
+        const isSpeculative = /\b(?:might|may|could|possibly|potentially|probably|seems|appears|reference|series|specific viewpoint|doesn'?t provide|provide additional information)\b/i.test(text);
+
+        return mentionsUnsupportedIdentifier && isSpeculative;
+    }
+
+    cleanHumanReadableAiDescriptionText(aiDescription: string | null): string | null {
+        if (!aiDescription?.trim() || !this.settings.filenameCandidatesHumanReadableOnly) return aiDescription;
+
+        const original = aiDescription.trim();
+        const sentences = original.match(/[^.!?]+(?:[.!?]+|$)(?:\s+|$)/g) ?? [original];
+        const cleaned = sentences
+            .filter(sentence => !this.isSpeculativeImageCodeSentence(sentence))
+            .join("")
+            .replace(/[ \t]+\n/g, "\n")
+            .replace(/\n{3,}/g, "\n\n")
+            .trim();
+
+        return cleaned || original;
+    }
+
     async enhanceAiDescriptionWithGeolocation(aiDescription: string | null, context: ImageGeolocationContext | null): Promise<string | null> {
-        if (!aiDescription?.trim() || !this.settings.useGeolocationForAiDescription) return aiDescription;
+        const readableDescription = this.cleanHumanReadableAiDescriptionText(aiDescription);
+        if (!readableDescription?.trim() || !this.settings.useGeolocationForAiDescription) return readableDescription;
         const contextText = this.formatGeolocationContextForDescription(context);
-        if (!contextText) return aiDescription;
+        if (!contextText) return readableDescription;
 
         const model = this.settings.ollamaModel.trim();
         if (!model) {
-            return this.appendGeolocationContextToDescription(aiDescription, contextText);
+            return this.cleanHumanReadableAiDescriptionText(this.appendGeolocationContextToDescription(readableDescription, contextText));
         }
 
         const requestVariants = this.buildOllamaDescriptionRequestVariants(
             model,
-            this.buildOllamaDescriptionGeolocationMessages(aiDescription, contextText)
+            this.buildOllamaDescriptionGeolocationMessages(readableDescription, contextText)
         );
 
         for (let attempt = 0; attempt < requestVariants.length; attempt += 1) {
@@ -5931,7 +7920,7 @@ ${mapping.property}`;
                     body: JSON.stringify(requestVariants[attempt]),
                 });
                 if (response.status < 200 || response.status >= 300) {
-                    console.warn("Maru\'s Autotag geolocation description enhancement attempt failed", {
+                    console.warn("Autotag geolocation description enhancement attempt failed", {
                         attempt: attempt + 1,
                         model,
                         status: response.status,
@@ -5941,12 +7930,13 @@ ${mapping.property}`;
                 }
 
                 const revised = this.normalizeOllamaDescriptionText(this.extractOllamaMessageText(response.json));
-                if (revised) {
-                    console.log(`Maru\'s Autotag geolocation-enhanced AI description (attempt ${attempt + 1}):`, revised);
-                    return revised;
+                const cleanedRevised = this.cleanHumanReadableAiDescriptionText(revised);
+                if (cleanedRevised) {
+                    console.log(`Autotag geolocation-enhanced AI description (attempt ${attempt + 1}):`, cleanedRevised);
+                    return cleanedRevised;
                 }
             } catch (error) {
-                console.warn("Maru\'s Autotag geolocation description enhancement attempt threw", {
+                console.warn("Autotag geolocation description enhancement attempt threw", {
                     attempt: attempt + 1,
                     model,
                     error: error instanceof Error ? error.message : String(error),
@@ -5954,7 +7944,7 @@ ${mapping.property}`;
             }
         }
 
-        return this.appendGeolocationContextToDescription(aiDescription, contextText);
+        return this.cleanHumanReadableAiDescriptionText(this.appendGeolocationContextToDescription(readableDescription, contextText));
     }
 
     async retryQueuedGeolocations(force = false): Promise<void> {
@@ -6023,6 +8013,12 @@ ${mapping.property}`;
 
     isTemplateOverwritePlaceholderValue(value: string): boolean {
         return value.toLowerCase().includes("this text will be overwritten");
+    }
+
+    removeLegacyTemplateOverwritePlaceholders(template: string): string {
+        return template
+            .replace(/^(\s*[A-Za-z0-9_-]+\s*:)\s*This text will be overwritten(?: by the AI image description\.)?\s*$/gim, "$1")
+            .replace(/^\s*-\s*This text will be overwritten(?: by the AI image description\.)?\s*(?:\r?\n|$)/gim, "");
     }
 
     getYamlValueDedupeKey(value: string): string {
@@ -6113,7 +8109,7 @@ ${mapping.property}`;
         existingNoteContent: string | null = null
     ): string {
         const fallbackProperty = this.normalizeFolderFallbackProperty(this.settings.folderFallbackProperty);
-        const baseTemplate = this.settings.templateSource === "bfm-templater"
+        const baseTemplate = this.settings.templateSource === "template-file"
             ? this.getTemplateFromExistingNote(existingNoteContent ?? "")
             : { template: this.getFrontmatterTemplate(), body: "" };
         const template = baseTemplate.template;
@@ -6174,9 +8170,11 @@ ${mapping.property}`;
         if (this.settings.aiTagsPropertyEnabled) {
             setGeneratedValues(aiTagsProperty, this.formatYamlList(aiTags, this.settings.aiTagsFormat).split("\n").filter(Boolean));
         }
-        if (this.settings.vaultAwarenessOutputEnabled && vaultAwarenessTags.length > 0) {
+        if (this.settings.vaultAwarenessOutputEnabled) {
+            const vaultAwarenessProperty = this.getVaultAwarenessOutputPropertyName();
+            propertyValues[vaultAwarenessProperty] = [];
             appendValues(
-                this.getVaultAwarenessOutputPropertyName(),
+                vaultAwarenessProperty,
                 this.formatYamlList(vaultAwarenessTags, this.settings.vaultAwarenessOutputFormat).split("\n").filter(Boolean)
             );
         }
@@ -6185,7 +8183,7 @@ ${mapping.property}`;
         }
 
         const templateProperties = template.order;
-        const requiredProperties = this.settings.templateSource === "bfm-templater"
+        const requiredProperties = this.settings.templateSource === "template-file"
             ? this.getEnabledGeneratedFrontmatterProperties()
             : this.getRequiredFrontmatterProperties();
         const order: string[] = [];
@@ -6207,8 +8205,14 @@ ${mapping.property}`;
             .forEach(addProperty);
 
         const generatedPropertyNames = this.getGeneratedPropertyNames();
+        const keepEmptyGeneratedProperties = new Set<string>();
+        if (this.settings.vaultAwarenessOutputEnabled) {
+            keepEmptyGeneratedProperties.add(this.getVaultAwarenessOutputPropertyName());
+        }
         const frontmatterLines = order
-            .filter(property => propertyValues[property]?.length > 0 || !generatedPropertyNames.has(property))
+            .filter(property => propertyValues[property]?.length > 0
+                || !generatedPropertyNames.has(property)
+                || keepEmptyGeneratedProperties.has(property))
             .map(property => this.buildYamlProperty(property, propertyValues[property] ?? [], listManagedProperties.has(property)))
             .join("\n");
 
@@ -6278,22 +8282,6 @@ ${frontmatterLines}
         return items;
     }
 
-    buildPreviewBfmTemplaterContent(): string {
-        const lines = [
-            "bfm-template-property:",
-            "- Preserved from BFM Templater",
-        ];
-
-        if (this.settings.linkToFilePropertyEnabled) lines.push(`${this.getLinkToFilePropertyName()}: This text will be overwritten`);
-        if (this.settings.fileTypePropertyEnabled) lines.push(`${this.getFileTypePropertyName()}: This text will be overwritten`);
-        if (this.settings.embedPropertyEnabled) lines.push(`${this.getEmbedPropertyName()}: This text will be overwritten`);
-        if (this.settings.aiTagsPropertyEnabled) lines.push(`${this.getAiTagsPropertyName()}:\n- This text will be overwritten`);
-        if (this.settings.vaultAwarenessOutputEnabled) lines.push(`${this.getVaultAwarenessOutputPropertyName()}:\n- This text will be preserved until Vault Awareness adds matching terms`);
-        if (this.settings.aiDescriptionPropertyEnabled) lines.push(`${this.getAiDescriptionPropertyName()}: This text will be overwritten`);
-
-        return `---\n${lines.join("\n")}\n---\nExisting BFM Templater body text.`;
-    }
-
     getPreviewPluginFilledProperties(): Set<string> {
         const filledProperties = new Set(this.getEnabledGeneratedFrontmatterProperties());
 
@@ -6314,11 +8302,8 @@ ${frontmatterLines}
     }
 
     getFrontmatterPreviewTemplateText(): string {
-        if (this.settings.templateSource === "bfm-templater") {
-            const extracted = this.getTemplateFromExistingNote(this.buildPreviewBfmTemplaterContent()).template;
-            return extracted.order
-                .map(property => this.buildYamlProperty(property, extracted.values[property] ?? []))
-                .join("\n");
+        if (this.settings.templateSource === "template-file") {
+            return this.getTemplateFileFrontmatterText() ?? "";
         }
 
         return this.settings.frontmatterTemplate ?? "";
@@ -6382,7 +8367,7 @@ ${frontmatterLines}
 
     getAvailableTemplatePropertyNames(): string[] {
         const properties = new Set<string>();
-        this.getEnabledGeneratedFrontmatterProperties().forEach(property => properties.add(property));
+        this.getActiveTemplateSuggestionGeneratedProperties().forEach(property => properties.add(property));
 
         if (this.settings.useFolderTags) {
             this.getFolderPropertyMappings().forEach(mapping => {
@@ -6410,6 +8395,11 @@ ${frontmatterLines}
     }
 
     buildGeneratedMarkdownPreview(): string {
+        const unavailableMessage = this.getTemplateFileUnavailableMessage();
+        if (unavailableMessage) {
+            return `${unavailableMessage} Select an existing Markdown template to enable checks and preview.`;
+        }
+
         const previewFilePath = this.buildPreviewImagePath();
         const {
             folderPropertyItems,
@@ -6417,6 +8407,13 @@ ${frontmatterLines}
             embedLink,
             fileExt,
         } = this.buildFolderMetadata(previewFilePath);
+        if (this.settings.useFolderTags) {
+            this.getFolderPropertyMappings().forEach(mapping => {
+                const property = this.normalizeFolderFallbackProperty(mapping.property);
+                if (!property || folderPropertyItems[property]?.length) return;
+                folderPropertyItems[property] = [this.formatYamlListItem("Example", mapping.format)];
+            });
+        }
         const geolocationPropertyItems = this.buildPreviewGeolocationPropertyItems();
         const previewVaultAwarenessTags = this.settings.vaultAwarenessEnabled
             ? [
@@ -6426,18 +8423,22 @@ ${frontmatterLines}
             : [];
         const includeVaultAwarenessInAiTags = this.settings.vaultAwarenessEnabled
             && (!this.settings.vaultAwarenessOutputEnabled || !this.settings.vaultAwarenessOutputExclusive);
-        const aiTags = this.settings.aiTaggingEnabled && this.settings.aiTagsPropertyEnabled
-            ? [
-                "Example Tag",
-                "Second Example",
-                ...(includeVaultAwarenessInAiTags ? previewVaultAwarenessTags : []),
-            ]
+        const aiTags = this.settings.aiTagsPropertyEnabled
+            ? this.settings.aiTaggingEnabled
+                ? [
+                    "Example Tag",
+                    "Second Example",
+                    ...(includeVaultAwarenessInAiTags ? previewVaultAwarenessTags : []),
+                ]
+                : this.canRunDirectBridgeOutput()
+                    ? ["Bridge Expansion"]
+                    : []
             : [];
         const aiDescription = this.settings.aiDescriptionPropertyEnabled
-            ? "This text will be overwritten by the AI image description."
+            ? "Example image description."
             : null;
-        const existingNoteContent = this.settings.templateSource === "bfm-templater"
-            ? this.buildPreviewBfmTemplaterContent()
+        const existingNoteContent = this.settings.templateSource === "template-file"
+            ? this.getTemplateFileContent()
             : null;
 
         return this.buildYamlContent(
@@ -6477,12 +8478,14 @@ ${frontmatterLines}
         await Promise.all(executing);
     }
 
-    enqueueFile(file: TFile, forceRetry = false, source: ProtectedJobSource = "shutdown"): void {
+    enqueueFile(file: TFile, forceRetry = false, source: ProtectedJobSource = "shutdown", immediateFlush = false): void {
+        if (this.isUnloading) return;
         const filePath = file.path;
 
         if (this.isDeletionSuppressed(filePath)) return;
-        if (!filePath.startsWith(this.settings.basePath)) return;
-        if (this.settings.processedFiles.includes(filePath)) return;
+        if (file.extension.toLowerCase() === "md") return;
+        if (!this.isPathInBasePath(filePath)) return;
+        if (this.settings.processedFiles.some(processedPath => this.areVaultPathsSame(processedPath, filePath))) return;
         if (!forceRetry && this.hasReachedMaxAttempts(filePath)) return;
 
         this.showLimitedFileTypeWarning(file);
@@ -6492,7 +8495,7 @@ ${frontmatterLines}
         }
 
         const runId = this.createRunId(filePath);
-        const expectedNotePath = this.getBfmNotePath(file);
+        const expectedNotePath = this.getCompanionNotePath(file);
         const pairRecord = this.ensurePairRecordForImage(filePath);
         this.currentRunIds.set(filePath, runId);
         this.registerActiveRunPair(runId, pairRecord.pairId, filePath, expectedNotePath);
@@ -6508,7 +8511,7 @@ ${frontmatterLines}
 
         const elapsed = Date.now() - this.queueBatchStartedAt;
         const remainingBatchWindow = this.settings.queueBatchMaxWaitMs - elapsed;
-        const delay = remainingBatchWindow <= 0
+        const delay = immediateFlush || remainingBatchWindow <= 0
             ? 0
             : Math.min(QUEUE_BATCH_DELAY_MS, remainingBatchWindow);
 
@@ -6519,6 +8522,7 @@ ${frontmatterLines}
         }, delay);
     }
     async processQueue(): Promise<void> {
+        if (this.isUnloading) return;
         if (this.isProcessingQueue) return;
         if (this.processingQueue.size === 0) return;
 
@@ -6544,7 +8548,7 @@ ${frontmatterLines}
                         this.updateActiveProcessingNotice();
                         return this.processQueuedFile(item.file, item.runId)
                         .finally(() => {
-                            this.activeWorkerPaths.delete(item.file.path);
+                            this.deletePathFromSet(this.activeWorkerPaths, item.file.path);
                             this.activeProcessingCompleted += 1;
                             this.updateActiveProcessingNotice();
                         });
@@ -6558,78 +8562,70 @@ ${frontmatterLines}
             this.completeActiveProcessingNotice();
         }
     }
-    async processQueuedFile(file: TFile, runId: string = this.currentRunIds.get(file.path) ?? this.createRunId(file.path)): Promise<void> {
+    async processQueuedFile(file: TFile, runId: string = this.getPathKeyValue(this.currentRunIds, file.path) ?? this.createRunId(file.path)): Promise<void> {
         const filePath = file.path;
 
+        if (this.isUnloading) return;
         if (!this.isCurrentRun(filePath, runId)) return;
         if (this.isDeletionSuppressed(filePath, runId)) {
             this.cleanupProcessingStateForPath(filePath, runId);
             await this.saveSettings();
             return;
         }
-        if (this.settings.processedFiles.includes(filePath)) {
+        if (this.settings.processedFiles.some(processedPath => this.areVaultPathsSame(processedPath, filePath))) {
             this.cleanupActiveRunPairsForPath(filePath, runId);
             this.markDuplicateProcessingComplete(filePath, runId);
-            this.currentRunIds.delete(filePath);
+            this.deletePathKey(this.currentRunIds, filePath);
             return;
         }
-        if (!filePath.startsWith(this.settings.basePath)) {
+        if (!this.isPathInBasePath(filePath)) {
             this.cleanupActiveRunPairsForPath(filePath, runId);
             this.markDuplicateProcessingComplete(filePath, runId);
-            this.currentRunIds.delete(filePath);
+            this.deletePathKey(this.currentRunIds, filePath);
             return;
         }
         if (this.hasReachedMaxAttempts(filePath)) {
             this.cleanupActiveRunPairsForPath(filePath, runId);
             this.markDuplicateProcessingComplete(filePath, runId);
-            this.currentRunIds.delete(filePath);
-            new Notice(`Maru\'s Autotag skipped after max failures: ${file.name}`);
+            this.deletePathKey(this.currentRunIds, filePath);
+            new Notice(`Autotag skipped after max failures: ${file.name}`);
             return;
         }
 
         try {
-            let notePath = this.activeRunPairs.get(runId)?.expectedNotePath ?? this.getBfmNotePath(file);
-            await this.saveProtectedJob(filePath, { stage: "waiting-bfm-note", notePath, runId });
-            let bfmNote = await this.waitForBfmNoteWithRetry(file, notePath);
+            let notePath = this.activeRunPairs.get(runId)?.expectedNotePath ?? this.getCompanionNotePath(file);
+            await this.saveProtectedJob(filePath, { stage: "companion-note", notePath, runId });
+            const companionNote = await this.createMissingCompanionNote(file, notePath);
             if (!this.isCurrentRun(filePath, runId)) return;
-            if (bfmNote) {
-                notePath = bfmNote.path;
-                this.updateActiveRunPair(runId, { resolvedNotePath: bfmNote.path });
-                this.updatePairRecord(this.activeRunPairs.get(runId)?.pairId, { notePath: bfmNote.path });
-                this.updatePendingDuplicateAction(runId, { newNotePath: bfmNote.path });
+            if (companionNote) {
+                notePath = companionNote.path;
+                this.updateActiveRunPair(runId, { resolvedNotePath: companionNote.path });
+                this.updatePairRecord(this.activeRunPairs.get(runId)?.pairId, { notePath: companionNote.path });
+                this.updatePendingDuplicateAction(runId, { newNotePath: companionNote.path });
             }
-            if (!bfmNote && this.shouldCreateMissingCompanionNote(filePath)) {
-                bfmNote = await this.createMissingBfmNoteWithRetry(file, notePath);
-                if (bfmNote instanceof TFile) {
-                    notePath = bfmNote.path;
-                    this.updateActiveRunPair(runId, { resolvedNotePath: bfmNote.path });
-                    this.updatePairRecord(this.activeRunPairs.get(runId)?.pairId, { notePath: bfmNote.path });
-                    this.updatePendingDuplicateAction(runId, { newNotePath: bfmNote.path });
-                }
-            }
-            if (!bfmNote && this.shouldDeleteLonelyFileWithoutCompanion(filePath) && !this.isDeletionSuppressed(filePath, runId)) {
-                await this.deleteLonelyFileWithoutCompanion(file, runId);
-                return;
-            }
-            if (!bfmNote) {
+            if (!companionNote) {
                 this.cleanupActiveRunPairsForPath(filePath, runId);
-                this.currentRunIds.delete(filePath);
+                this.deletePathKey(this.currentRunIds, filePath);
                 this.markDuplicateProcessingComplete(filePath, runId);
                 this.removeProtectedJob(filePath);
                 if (!this.isDeletionSuppressed(filePath, runId) && !this.isDeletionSuppressed(notePath)) {
-                    await this.recordProcessingFailure(file, `BFM note not found after retry: ${notePath}`, false);
+                    await this.recordProcessingFailure(file, `Companion note could not be created: ${notePath}`, false);
                 }
                 return;
             }
-            if (this.isDeletionSuppressed(filePath, runId) || this.isDeletionSuppressed(bfmNote.path)) {
+            if (this.isDeletionSuppressed(filePath, runId) || this.isDeletionSuppressed(companionNote.path)) {
                 this.cleanupProcessingStateForPath(filePath, runId);
-                this.cleanupProcessingStateForPath(bfmNote.path);
+                this.cleanupProcessingStateForPath(companionNote.path);
                 await this.saveSettings();
                 return;
             }
 
             const {
                 folderCandidateValues,
+                folderStrongCandidateValues,
+                folderConsiderCandidateValues,
+                folderExcludedCandidateValues,
+                folderGeneratedValues,
                 folderPropertyItems,
                 wikiLink,
                 embedLink,
@@ -6639,7 +8635,7 @@ ${frontmatterLines}
             const duplicateHandling = await this.getPreparedDuplicateHandling(file, runId);
             if (!this.isCurrentRun(filePath, runId)) return;
             if (duplicateHandling.match && duplicateHandling.action === "delete-new-pair") {
-                await this.deleteNewDuplicatePair(file, bfmNote, runId);
+                await this.deleteNewDuplicatePair(file, companionNote, runId);
                 return;
             }
             await this.saveProtectedJob(filePath, { stage: "processing", notePath, runId });
@@ -6653,11 +8649,15 @@ ${frontmatterLines}
             let vaultAwarenessTags: string[] = [];
 
             {
-                aiDescription = await this.analyzeImageFile(file);
-                const shouldGenerateTagMetadata = this.settings.aiTaggingEnabled
+                const shouldRunAiTagModel = this.settings.aiTaggingEnabled
                     && (this.settings.aiTagsPropertyEnabled || (this.settings.vaultAwarenessEnabled && this.settings.vaultAwarenessOutputEnabled));
+                const shouldRunDirectBridgeMetadata = this.settings.aiTagsPropertyEnabled
+                    && this.canRunDirectBridgeOutput();
+                const shouldGenerateTagMetadata = shouldRunAiTagModel || shouldRunDirectBridgeMetadata;
                 const shouldUseAiDescription = this.settings.aiDescriptionPropertyEnabled
-                    || shouldGenerateTagMetadata;
+                    || shouldRunAiTagModel;
+                const shouldAnalyzeImage = this.settings.imageAnalysisEnabled && shouldUseAiDescription;
+                aiDescription = shouldAnalyzeImage ? await this.analyzeImageFile(file) : null;
                 if (shouldUseAiDescription) {
                     aiDescription = await this.enhanceAiDescriptionWithGeolocation(aiDescription, geolocationContext);
                 }
@@ -6668,33 +8668,37 @@ ${frontmatterLines}
                 }
 
                 if (aiDescription) {
-                    console.log("Maru\'s Autotag AI description:", aiDescription);
+                    console.log("Autotag AI description:", aiDescription);
                 } else {
-                    const needsAiDescription = this.settings.aiDescriptionPropertyEnabled || shouldGenerateTagMetadata;
-                    const fallbackTaggingAvailable = shouldGenerateTagMetadata
+                    const needsAiDescription = shouldAnalyzeImage && (this.settings.aiDescriptionPropertyEnabled || shouldRunAiTagModel);
+                    const geolocationTaggingAvailable = shouldGenerateTagMetadata
+                        && this.formatGeolocationContextForAiTags(geolocationContext).length > 0;
+                    const fallbackTaggingAvailable = shouldRunAiTagModel
                         && ((this.settings.filenameCandidateMode === "all" && this.getFilenameKeywordCandidates(file).length > 0)
-                            || (this.settings.folderTagsCandidateMode === "all" && this.getFolderTagCandidates(folderCandidateValues).length > 0));
+                            || this.getFolderTagCandidates(folderStrongCandidateValues).length > 0
+                            || geolocationTaggingAvailable);
 
                     if (needsAiDescription && !fallbackTaggingAvailable) {
-                        this.removeDuplicateRecordsForPath(filePath);
-                        this.duplicateFingerprintCache.delete(this.getRunCacheKey(filePath, runId));
-                        this.duplicateHandlingCache.delete(this.getRunCacheKey(filePath, runId));
-                        this.markDuplicateProcessingComplete(filePath, runId);
-                        this.cleanupActiveRunPairsForPath(filePath, runId);
-                        this.currentRunIds.delete(filePath);
-                        this.removeProtectedJob(filePath);
-                        await this.recordProcessingFailure(file, "AI Image Analyzer returned no description");
-                        return;
+                        console.warn("Autotag: Image analysis returned no description; writing the rest of the companion metadata.", file.basename);
                     }
 
                     if (fallbackTaggingAvailable) {
-                        console.warn("Maru\'s Autotag: AI Image Analyzer returned no description; using filename or folder keywords for AI tagging.", file.basename);
+                        console.warn("Autotag: Image analysis returned no description; using filename, folder, or geolocation metadata for AI tagging.", file.basename);
                     }
                 }
 
                 const shouldGenerateAiTags = shouldGenerateTagMetadata;
                 const generatedTags = shouldGenerateAiTags
-                    ? await this.generateAiTags(aiDescription, folderCandidateValues, file)
+                    ? await this.generateAiTags(
+                        aiDescription,
+                        folderCandidateValues,
+                        file,
+                        geolocationContext,
+                        folderGeneratedValues,
+                        folderExcludedCandidateValues,
+                        folderStrongCandidateValues,
+                        folderConsiderCandidateValues
+                    )
                     : { aiTags: [], vaultAwarenessTags: [] };
                 aiTags = generatedTags.aiTags;
                 vaultAwarenessTags = generatedTags.vaultAwarenessTags;
@@ -6703,37 +8707,34 @@ ${frontmatterLines}
                     this.markDuplicateProcessingComplete(filePath, runId);
                     return;
                 }
-                if (shouldGenerateAiTags && aiTags.length === 0 && (!this.settings.vaultAwarenessOutputEnabled || vaultAwarenessTags.length === 0)) {
-                    this.removeDuplicateRecordsForPath(filePath);
-                    this.duplicateFingerprintCache.delete(this.getRunCacheKey(filePath, runId));
-                    this.duplicateHandlingCache.delete(this.getRunCacheKey(filePath, runId));
-                    this.markDuplicateProcessingComplete(filePath, runId);
-                    this.cleanupActiveRunPairsForPath(filePath, runId);
-                    this.currentRunIds.delete(filePath);
-                    this.removeProtectedJob(filePath);
-                    await this.recordProcessingFailure(file, "Ollama did not return aitags");
-                    return;
+                if (shouldGenerateAiTags
+                    && aiTags.length === 0
+                    && (!this.settings.vaultAwarenessOutputEnabled || vaultAwarenessTags.length === 0)
+                    && !generatedTags.hadAiTagResponse) {
+                    console.warn("Autotag: Tag model returned no AI tags; writing the rest of the companion metadata.", file.basename);
                 }
 
                 if (shouldGenerateAiTags) {
-                    console.log("Maru\'s Autotag aitags:", aiTags);
+                    console.log("Autotag aitags:", aiTags);
                     if (vaultAwarenessTags.length > 0) {
-                        console.log("Maru\'s Autotag vault awareness tags:", vaultAwarenessTags);
+                        console.log("Autotag vault awareness tags:", vaultAwarenessTags);
+                    } else if (this.settings.vaultAwarenessEnabled && this.settings.vaultAwarenessOutputEnabled) {
+                        console.log("Autotag Vault Awareness completed with no accepted vocabulary matches.");
                     }
                 }
             }
 
-            const currentSourceFile = this.app.vault.getAbstractFileByPath(filePath);
-            const currentBfmNote = this.app.vault.getAbstractFileByPath(bfmNote.path);
-            if (!(currentSourceFile instanceof TFile) || !(currentBfmNote instanceof TFile) || this.isDeletionSuppressed(filePath, runId) || this.isDeletionSuppressed(bfmNote.path)) {
+            const currentSourceFile = this.getVaultFileByPathFlexible(filePath);
+            const currentCompanionNote = this.getVaultFileByPathFlexible(companionNote.path);
+            if (!(currentSourceFile instanceof TFile) || !(currentCompanionNote instanceof TFile) || this.isDeletionSuppressed(filePath, runId) || this.isDeletionSuppressed(companionNote.path)) {
                 this.cleanupProcessingStateForPath(filePath, runId);
-                this.cleanupProcessingStateForPath(bfmNote.path);
+                this.cleanupProcessingStateForPath(companionNote.path);
                 await this.saveSettings();
                 return;
             }
 
-            const existingNoteContent = this.settings.templateSource === "bfm-templater"
-                ? await this.app.vault.read(currentBfmNote)
+            const existingNoteContent = this.settings.templateSource === "template-file"
+                ? await this.app.vault.read(currentCompanionNote)
                 : null;
             const yamlContent = this.buildYamlContent(
                 mergedFolderPropertyItems,
@@ -6747,24 +8748,26 @@ ${frontmatterLines}
                 existingNoteContent
             );
 
-            if (this.isDeletionSuppressed(filePath, runId) || this.isDeletionSuppressed(bfmNote.path)) {
+            if (this.isDeletionSuppressed(filePath, runId) || this.isDeletionSuppressed(companionNote.path)) {
                 this.cleanupProcessingStateForPath(filePath, runId);
-                this.cleanupProcessingStateForPath(bfmNote.path);
+                this.cleanupProcessingStateForPath(companionNote.path);
                 await this.saveSettings();
                 return;
             }
             if (!this.isCurrentRun(filePath, runId)) return;
             await this.saveProtectedJob(filePath, { stage: "writing", notePath, runId });
-            await this.app.vault.modify(currentBfmNote, yamlContent);
+            await this.app.vault.modify(currentCompanionNote, yamlContent);
+            if (this.isUnloading || !this.isCurrentRun(filePath, runId)) return;
 
-            const finalDuplicateHandling = await this.finalizeDuplicateAction(file, currentBfmNote, duplicateHandling, runId);
+            const finalDuplicateHandling = await this.finalizeDuplicateAction(file, currentCompanionNote, duplicateHandling, runId);
             if (finalDuplicateHandling.action === "delete-new-pair") return;
+            if (this.isUnloading || !this.isCurrentRun(filePath, runId)) return;
             const activePairAfterReplace = this.activeRunPairs.get(runId);
             const pairRecordAfterReplace = this.getPairRecordById(activePairAfterReplace?.pairId);
             const finalProcessedPath = finalDuplicateHandling.action === "replace-original-keep-original" && finalDuplicateHandling.match
                 ? finalDuplicateHandling.match.record.filePath
                 : pairRecordAfterReplace?.imagePath ?? filePath;
-            const finalNotePath = pairRecordAfterReplace?.notePath ?? currentBfmNote.path;
+            const finalNotePath = pairRecordAfterReplace?.notePath ?? currentCompanionNote.path;
             this.clearFailedFile(filePath);
             this.updatePairRecord(activePairAfterReplace?.pairId, { imagePath: finalProcessedPath, notePath: finalNotePath });
             if (this.isDuplicateProtectionActive() && finalDuplicateHandling.exactHash) {
@@ -6778,9 +8781,9 @@ ${frontmatterLines}
             }
             this.markDuplicateProcessingComplete(filePath, runId);
             this.cleanupActiveRunPairsForPath(filePath, runId);
-            if (this.isCurrentRun(filePath, runId)) this.currentRunIds.delete(filePath);
+            if (this.isCurrentRun(filePath, runId)) this.deletePathKey(this.currentRunIds, filePath);
             this.removeProtectedJob(filePath);
-            if (!this.settings.processedFiles.includes(finalProcessedPath)) {
+            if (!this.settings.processedFiles.some(processedPath => this.areVaultPathsSame(processedPath, finalProcessedPath))) {
                 this.settings.processedFiles.push(finalProcessedPath);
             }
             await this.saveSettings();
@@ -6797,7 +8800,7 @@ ${frontmatterLines}
             this.duplicateHandlingCache.delete(this.getRunCacheKey(filePath, runId));
             this.markDuplicateProcessingComplete(filePath, runId);
             this.cleanupActiveRunPairsForPath(filePath, runId);
-            this.currentRunIds.delete(filePath);
+            this.deletePathKey(this.currentRunIds, filePath);
             this.removeProtectedJob(filePath);
             const reason = e instanceof Error ? e.message : String(e);
             await this.recordProcessingFailure(file, reason);
@@ -6808,16 +8811,18 @@ ${frontmatterLines}
     // =========================
 
     async onload() {
+        this.isUnloading = false;
         await this.loadSettings();
-        this.buildVaultVocabularyCache();
-        this.app.workspace.onLayoutReady(() => this.buildVaultVocabularyCache());
-        this.settingTab = new BfmAutotagSettingTab(this.app, this);
+        this.scheduleVaultVocabularyCacheBuild(1500);
+        this.app.workspace.onLayoutReady(() => this.scheduleVaultVocabularyCacheBuild(1500));
+        this.app.workspace.onLayoutReady(() => void this.syncAutomaticFolderPropertyMappings());
+        this.settingTab = new AutotagSettingTab(this.app, this);
         this.addSettingTab(this.settingTab);
 
         this.registerEvent(
             this.app.workspace.on("file-menu", (menu, file) => {
                 if (file instanceof TFile) {
-                    this.addBfmAutotagFileContextMenu(menu, file);
+                    this.addAutotagFileContextMenu(menu, file);
                 }
             })
         );
@@ -6826,20 +8831,26 @@ ${frontmatterLines}
             this.app.workspace.on("editor-menu", (menu, editor, info) => {
                 const embeddedFile = this.resolveEditorEmbedFile(editor, info);
                 if (embeddedFile instanceof TFile) {
-                    this.addBfmAutotagFileContextMenu(menu, embeddedFile);
+                    this.addAutotagFileContextMenu(menu, embeddedFile);
                 }
             })
         );
 
         this.app.workspace.onLayoutReady(() => {
             if (this.settings.autoProcessUnprocessedOnReload) {
-                void this.processUnprocessedBaseFiles(true);
+                if (this.startupAutoProcessTimer !== null) {
+                    window.clearTimeout(this.startupAutoProcessTimer);
+                }
+                this.startupAutoProcessTimer = window.setTimeout(() => {
+                    this.startupAutoProcessTimer = null;
+                    void this.processUnprocessedBaseFiles(true);
+                }, 8000);
             }
         });
 
         this.registerEvent(
             this.app.metadataCache.on('resolved', () => {
-                this.buildVaultVocabularyCache();
+                this.scheduleVaultVocabularyCacheBuild(1500);
             })
         );
 
@@ -6847,12 +8858,14 @@ ${frontmatterLines}
             this.app.metadataCache.on('changed', (file) => {
                 if (file instanceof TFile) {
                     this.indexVocabularyFile(file);
+                    void this.syncAutomaticFolderPropertyMappingsFromFile(file);
                 }
             })
         );
         this.registerEvent(
             this.app.vault.on('create', async (file) => {
                 if (!(file instanceof TFile)) return;
+                this.invalidateExpensiveHealthCounts();
                 if (this.isDeletionSuppressed(file.path)) {
                     if (file.extension.toLowerCase() === "md") {
                         this.deletionCascadePaths.add(file.path);
@@ -6866,17 +8879,24 @@ ${frontmatterLines}
                     }
 
                     this.clearDeletionSuppression(file.path);
-                    this.clearDeletionSuppression(this.getBfmNotePath(file));
+                    this.clearDeletionSuppression(this.getCompanionNotePath(file));
                 }
-                this.enqueueFile(file);
+                const fileToProcess = await this.moveNewFileIntoBasePathIfNeeded(file);
+                if (fileToProcess instanceof TFile) {
+                    this.enqueueFile(fileToProcess);
+                }
             })
         );
 
         this.registerEvent(
             this.app.vault.on('delete', async (file) => {
                 if (!(file instanceof TFile)) return;
+                this.invalidateExpensiveHealthCounts();
                 const filePath = file.path;
                 this.removeVocabularyFile(filePath);
+                if (file.extension.toLowerCase() === "md") {
+                    this.scheduleAutomaticFolderPropertySync();
+                }
                 let duplicateActionChanged = this.cancelPendingDuplicateActionsForPath(filePath);
 
                 if (this.deletionCascadePaths.has(filePath)) {
@@ -6905,8 +8925,12 @@ ${frontmatterLines}
         this.registerEvent(
             this.app.vault.on('rename', async (file, oldPath) => {
                 if (!(file instanceof TFile)) return;
+                this.invalidateExpensiveHealthCounts();
                 this.removeVocabularyFile(oldPath);
                 this.indexVocabularyFile(file);
+                if (file.extension.toLowerCase() === "md") {
+                    this.scheduleAutomaticFolderPropertySync();
+                }
                 this.renameActiveRunPairPath(oldPath, file.path);
                 this.renamePendingDuplicateActionPath(oldPath, file.path);
                 const cachedFingerprint = this.duplicateFingerprintCache.get(oldPath);
@@ -6927,21 +8951,21 @@ ${frontmatterLines}
                     this.duplicateProcessingCompletionResolvers.delete(oldPath);
                     this.duplicateProcessingCompletionResolvers.set(file.path, cachedCompletionResolver);
                 }
-                const activeRunId = this.currentRunIds.get(oldPath);
+                const activeRunId = this.getPathKeyValue(this.currentRunIds, oldPath);
                 if (activeRunId) {
-                    this.currentRunIds.delete(oldPath);
+                    this.deletePathKey(this.currentRunIds, oldPath);
                     this.currentRunIds.set(file.path, activeRunId);
                     if (file.extension.toLowerCase() !== "md") {
-                        this.updateActiveRunPair(activeRunId, { imagePath: file.path, expectedNotePath: this.getBfmNotePath(file) });
+                        this.updateActiveRunPair(activeRunId, { imagePath: file.path, expectedNotePath: this.getCompanionNotePath(file) });
                     }
                 }
-                const queuedItem = this.processingQueue.get(oldPath);
+                const queuedItem = this.getPathKeyValue(this.processingQueue, oldPath);
                 if (queuedItem) {
-                    this.processingQueue.delete(oldPath);
+                    this.deletePathKey(this.processingQueue, oldPath);
                     this.processingQueue.set(file.path, { file, runId: queuedItem.runId });
                 }
-                if (this.activeWorkerPaths.has(oldPath)) {
-                    this.activeWorkerPaths.delete(oldPath);
+                if (this.hasPathInSet(this.activeWorkerPaths, oldPath)) {
+                    this.deletePathFromSet(this.activeWorkerPaths, oldPath);
                     this.activeWorkerPaths.add(file.path);
                 }
                 const failedFile = this.getFailedFile(oldPath);
@@ -6950,7 +8974,7 @@ ${frontmatterLines}
                     failedFile.path = file.path;
                     shouldSaveRenameState = true;
                 }
-                const renamedImageNotePath = file.extension.toLowerCase() === "md" ? undefined : this.getBfmNotePath(file);
+                const renamedImageNotePath = file.extension.toLowerCase() === "md" ? undefined : this.getCompanionNotePath(file);
                 if (this.updateDuplicateRecordsForRename(oldPath, file.path, renamedImageNotePath)) {
                     shouldSaveRenameState = true;
                 }
@@ -6960,7 +8984,7 @@ ${frontmatterLines}
                 if (this.updatePendingGeocodeJobsForRename(oldPath, file.path)) {
                     shouldSaveRenameState = true;
                 }
-                const index = this.settings.processedFiles.indexOf(oldPath);
+                const index = this.settings.processedFiles.findIndex(processedPath => this.areVaultPathsSame(processedPath, oldPath));
                 if (index !== -1) {
                     this.settings.processedFiles.splice(index, 1, file.path);
                     shouldSaveRenameState = true;
@@ -6981,6 +9005,36 @@ ${frontmatterLines}
     }
 
     onunload() {
+        this.isUnloading = true;
+        if (this.settings.shutdownProtectionEnabled) {
+            this.currentRunIds.forEach((runId, path) => {
+                const existing = this.getProtectedJob(path);
+                const file = this.getVaultFileByPathFlexible(path);
+                this.upsertProtectedJob(path, {
+                    stage: existing?.stage ?? (this.activeWorkerPaths.has(path) ? "processing" : "queued"),
+                    notePath: existing?.notePath ?? (file instanceof TFile ? this.getCompanionNotePath(file) : undefined),
+                    source: existing?.source ?? "shutdown",
+                    runId,
+                });
+            });
+            void this.saveData(this.settings);
+        }
+        if (this.startupAutoProcessTimer !== null) {
+            window.clearTimeout(this.startupAutoProcessTimer);
+            this.startupAutoProcessTimer = null;
+        }
+
+        if (this.vaultVocabularyBuildTimer !== null) {
+            window.clearTimeout(this.vaultVocabularyBuildTimer);
+            this.vaultVocabularyBuildTimer = null;
+        }
+        this.vaultVocabularyBuildGeneration += 1;
+
+        if (this.automaticFolderPropertySyncTimer !== null) {
+            window.clearTimeout(this.automaticFolderPropertySyncTimer);
+            this.automaticFolderPropertySyncTimer = null;
+        }
+
         if (this.queueFlushTimer !== null) {
             window.clearTimeout(this.queueFlushTimer);
             this.queueFlushTimer = null;
@@ -6992,6 +9046,7 @@ ${frontmatterLines}
         this.activeRunPairs.clear();
         this.pendingDuplicateActions.clear();
         this.pendingManualPairActions.clear();
+        this.invalidateExpensiveHealthCounts();
         this.clearActiveProcessingNotice();
     }
 
@@ -7045,29 +9100,106 @@ ${frontmatterLines}
         return `${this.sanitizeSettingsProfileName(name)}.json`;
     }
 
-    getProfileControlledSettings(source: Partial<BfmAutotagSettings>): Partial<BfmAutotagSettings> {
-        const profileSettings: Partial<BfmAutotagSettings> = {};
+    mergeBridgeRuleTexts(...texts: unknown[]): string {
+        const seen = new Set<string>();
+        const lines: string[] = [];
+        texts.forEach(text => {
+            if (typeof text !== "string") return;
+            text
+                .split(/\r?\n/)
+                .map(line => line.trim())
+                .filter(Boolean)
+                .forEach(line => {
+                    const key = line.toLowerCase();
+                    if (seen.has(key)) return;
+                    seen.add(key);
+                    lines.push(line);
+                });
+        });
+        return lines.join("\n");
+    }
+
+    migrateLegacySettingsShape(source: unknown): Partial<AutotagSettings> {
+        if (!source || typeof source !== "object" || Array.isArray(source)) return {};
+        const migrated: Record<string, unknown> = { ...(source as Record<string, unknown>) };
+
+        if (typeof migrated.companionNoteFolder !== "string" && typeof migrated.bfmNewFileLocation === "string") {
+            migrated.companionNoteFolder = migrated.bfmNewFileLocation;
+        }
+        if (typeof migrated.companionNoteNameFormat !== "string" && typeof migrated.bfmFileNameFormat === "string") {
+            migrated.companionNoteNameFormat = migrated.bfmFileNameFormat;
+        }
+        if (typeof migrated.bridgeRules !== "string") {
+            migrated.bridgeRules = this.mergeBridgeRuleTexts(
+                migrated.manualSubjectBridgeRules,
+                migrated.manualEnrichmentRules
+            );
+        }
+        if (migrated.useDuplicateProtection === false && migrated.duplicateDetectionMode !== "off") {
+            migrated.duplicateDetectionMode = "off";
+        }
+
+        const legacyFolderCandidateMode = this.isValidCandidateMode(migrated.folderTagsCandidateMode)
+            ? migrated.folderTagsCandidateMode as CandidateMode
+            : undefined;
+        if (Array.isArray(migrated.folderPropertyMappings)) {
+            migrated.folderPropertyMappings = migrated.folderPropertyMappings.map(rawMapping => {
+                if (!rawMapping || typeof rawMapping !== "object" || Array.isArray(rawMapping)) return rawMapping;
+                const mapping = { ...(rawMapping as Record<string, unknown>) };
+                if (!this.isValidCandidateMode(mapping.aiCandidateMode)) {
+                    mapping.aiCandidateMode = mapping.useAsAiCandidate === false
+                        ? "disabled"
+                        : legacyFolderCandidateMode ?? DEFAULT_SETTINGS.folderFallbackAiCandidateMode;
+                }
+                mapping.useAsAiCandidate = this.isCandidateSourceActive(mapping.aiCandidateMode as CandidateMode);
+                return mapping;
+            });
+        }
+        if (!this.isValidCandidateMode(migrated.folderFallbackAiCandidateMode) && legacyFolderCandidateMode) {
+            migrated.folderFallbackAiCandidateMode = migrated.folderFallbackUseAsAiCandidate === false
+                ? "disabled"
+                : legacyFolderCandidateMode;
+        }
+
+        delete migrated.bfmNewFileLocation;
+        delete migrated.bfmFileNameFormat;
+        delete migrated.bfmNewFileLocationSource;
+        delete migrated.bfmFileNameFormatSource;
+        delete migrated.useDuplicateProtection;
+        delete migrated.folderTagsCandidateMode;
+        delete migrated.manualEnrichmentRules;
+        delete migrated.manualSubjectBridgeRules;
+        delete migrated.clearDropdownExcludedProperties;
+
+        return migrated as Partial<AutotagSettings>;
+    }
+
+    getProfileControlledSettings(source: Partial<AutotagSettings>): Partial<AutotagSettings> {
+        const profileSettings: Partial<AutotagSettings> = {};
+        const migratedSource = this.migrateLegacySettingsShape(source);
         SETTINGS_PROFILE_CONTROLLED_KEYS.forEach(key => {
-            if (Object.prototype.hasOwnProperty.call(source, key)) {
-                (profileSettings as any)[key] = this.cloneSettingsValue((source as any)[key]);
+            if (Object.prototype.hasOwnProperty.call(migratedSource, key)) {
+                (profileSettings as any)[key] = this.cloneSettingsValue((migratedSource as any)[key]);
             }
         });
         return profileSettings;
     }
 
-    getCompleteProfileControlledSettings(source: Partial<BfmAutotagSettings>): Partial<BfmAutotagSettings> {
+    getCompleteProfileControlledSettings(source: Partial<AutotagSettings>): Partial<AutotagSettings> {
         return {
             ...this.getProfileControlledSettings(DEFAULT_SETTINGS),
             ...this.getProfileControlledSettings(source),
         };
     }
 
-    serializeSettingsProfileSettings(settings: Partial<BfmAutotagSettings>): string {
+    serializeSettingsProfileSettings(settings: Partial<AutotagSettings>): string {
         return JSON.stringify(this.getCompleteProfileControlledSettings(settings));
     }
 
     getBuiltInSettingsProfiles(): SettingsProfileSummary[] {
         const defaultSettings = this.getProfileControlledSettings(DEFAULT_SETTINGS);
+        const devSettings = this.getCompleteProfileControlledSettings(BUILTIN_DEV_PROFILE_SETTINGS);
+        const featureTestSettings = this.getCompleteProfileControlledSettings(BUILTIN_FEATURE_TEST_PROFILE_SETTINGS);
         return [
             {
                 id: BUILTIN_DEFAULT_SETTINGS_PROFILE_ID,
@@ -7081,16 +9213,23 @@ ${frontmatterLines}
                 name: "Dev",
                 custom: false,
                 builtIn: true,
-                settings: defaultSettings,
+                settings: devSettings,
+            },
+            {
+                id: BUILTIN_FEATURE_TEST_SETTINGS_PROFILE_ID,
+                name: "Feature Test",
+                custom: false,
+                builtIn: true,
+                settings: featureTestSettings,
             },
         ];
     }
 
     parseSettingsProfileJson(text: string, fallbackName: string): SettingsProfileFile {
-        const parsed = JSON.parse(text) as SettingsProfileFile | Partial<BfmAutotagSettings>;
+        const parsed = JSON.parse(text) as SettingsProfileFile | Partial<AutotagSettings>;
         const settings = parsed && typeof parsed === "object" && "settings" in parsed
             ? (parsed as SettingsProfileFile).settings
-            : parsed as Partial<BfmAutotagSettings>;
+            : parsed as Partial<AutotagSettings>;
         const name = this.sanitizeSettingsProfileName(
             parsed && typeof parsed === "object" && "name" in parsed && typeof (parsed as SettingsProfileFile).name === "string"
                 ? (parsed as SettingsProfileFile).name
@@ -7120,7 +9259,7 @@ ${frontmatterLines}
                 settings: parsed.settings ?? {},
             };
         } catch (error) {
-            console.warn("Maru\'s Autotag could not read settings profile", path, error);
+            console.warn("Autotag could not read settings profile", path, error);
             return null;
         }
     }
@@ -7141,7 +9280,7 @@ ${frontmatterLines}
                 .sort((a, b) => a.name.localeCompare(b.name));
             return [...builtIns, ...fileProfiles];
         } catch (error) {
-            console.warn("Maru\'s Autotag could not list settings profiles", error);
+            console.warn("Autotag could not list settings profiles", error);
             return builtIns;
         }
     }
@@ -7167,7 +9306,7 @@ ${frontmatterLines}
 
     async writeSettingsProfileFile(
         name: string,
-        settings: Partial<BfmAutotagSettings>,
+        settings: Partial<AutotagSettings>,
         custom: boolean,
         sourceName?: string,
         existingPath?: string
@@ -7214,7 +9353,7 @@ ${frontmatterLines}
             new Notice(`Imported setup profile: ${imported.name}`);
             return imported;
         } catch (error) {
-            console.warn("Maru\'s Autotag settings profile import failed", error);
+            console.warn("Autotag settings profile import failed", error);
             new Notice(`Could not import setup profile: ${fallbackName}`);
             return null;
         }
@@ -7234,7 +9373,7 @@ ${frontmatterLines}
 
     async showSettingsProfileSaveDialog(defaultPath: string): Promise<string | null | undefined> {
         const options = {
-            title: "Export Maru\'s Autotag setup",
+            title: "Export Autotag setup",
             defaultPath,
             filters: [{ name: "JSON", extensions: ["json"] }],
         };
@@ -7254,7 +9393,7 @@ ${frontmatterLines}
             const directResult = await openDialog(electron.dialog);
             if (directResult !== undefined) return directResult;
         } catch (error) {
-            console.warn("Maru\'s Autotag settings profile save dialog unavailable", error);
+            console.warn("Autotag settings profile save dialog unavailable", error);
         }
 
         return undefined;
@@ -7301,7 +9440,7 @@ ${frontmatterLines}
             new Notice(`Exported setup profile: ${profileName}`);
             return true;
         } catch (error) {
-            console.warn("Maru\'s Autotag settings profile export failed", error);
+            console.warn("Autotag settings profile export failed", error);
             new Notice("Could not export setup profile.");
             return false;
         }
@@ -7321,6 +9460,11 @@ ${frontmatterLines}
             SETTINGS_PROFILE_CONTROLLED_KEYS.forEach(key => {
                 (this.settings as any)[key] = this.cloneSettingsValue((settingsToApply as any)[key]);
             });
+            this.settings.folderPropertyMappings = this.normalizeFolderPropertyMappings(this.settings.folderPropertyMappings);
+            this.settings.folderPropertyManualValueMemory = this.normalizeFolderPropertyManualValueMemory(
+                this.settings.folderPropertyManualValueMemory
+            );
+            this.rememberManualFolderPropertyValuesFromMappings();
             this.settings.settingsProfileId = profile.id;
             this.settingsProfileSnapshot = this.serializeSettingsProfileSettings(this.settings);
             await this.saveData(this.settings);
@@ -7445,13 +9589,14 @@ ${frontmatterLines}
             }
             this.settingsProfileSnapshot = this.serializeSettingsProfileSettings(this.settings);
         } catch (error) {
-            console.warn("Maru\'s Autotag could not sync setup profile", error);
+            console.warn("Autotag could not sync setup profile", error);
         }
     }
 
     async loadSettings() {
         const loadedSettings = await this.loadData();
-        this.settings = Object.assign({}, DEFAULT_SETTINGS, loadedSettings);
+        const migratedSettings = this.migrateLegacySettingsShape(loadedSettings);
+        this.settings = Object.assign({}, DEFAULT_SETTINGS, migratedSettings);
         this.settings.settingsProfileId = typeof this.settings.settingsProfileId === "string" && this.settings.settingsProfileId.trim()
             ? this.settings.settingsProfileId
             : BUILTIN_DEFAULT_SETTINGS_PROFILE_ID;
@@ -7470,6 +9615,11 @@ ${frontmatterLines}
         this.settings.bridgeLinguisticFeatures = normalizeLinguisticFeatures(loadedSettings?.bridgeLinguisticFeatures);
         this.settings.vaultLinguisticFeatures = normalizeLinguisticFeatures(loadedSettings?.vaultLinguisticFeatures);
         this.settings.bridgeEnabled = this.settings.bridgeEnabled === true;
+        this.settings.manualEnrichmentEnabled = this.settings.manualEnrichmentEnabled !== false;
+        this.settings.bridgeUseAiInput = this.settings.bridgeUseAiInput !== false;
+        this.settings.bridgeUseFilenameInput = this.settings.bridgeUseFilenameInput !== false;
+        this.settings.bridgeUseFolderInput = this.settings.bridgeUseFolderInput !== false;
+        this.settings.bridgeUseGeolocationInput = this.settings.bridgeUseGeolocationInput !== false;
         this.settings.hideBridgeLinguisticFeatures = this.settings.hideBridgeLinguisticFeatures !== false;
         this.settings.hideVaultLinguisticFeatures = this.settings.hideVaultLinguisticFeatures !== false;
 
@@ -7480,11 +9630,7 @@ ${frontmatterLines}
         this.settings.shutdownProtectionEnabled = this.settings.shutdownProtectionEnabled === true;
         this.settings.autoProcessUnprocessedOnReload = this.settings.autoProcessUnprocessedOnReload === true;
         this.settings.deleteLinkedFilePair = this.settings.deleteLinkedFilePair !== false;
-        this.settings.createMissingCompanionNote = this.settings.createMissingCompanionNote !== false;
-        this.settings.deleteLonelyFileWithoutCompanion = this.settings.deleteLonelyFileWithoutCompanion === true;
-        this.settings.lonelyDeletedImageCount = Number.isFinite(Number(this.settings.lonelyDeletedImageCount)) ? Math.max(0, Math.round(Number(this.settings.lonelyDeletedImageCount))) : DEFAULT_SETTINGS.lonelyDeletedImageCount;
-        this.settings.useDuplicateProtection = this.settings.useDuplicateProtection !== false;
-        const validShutdownStages: ShutdownProtectionStage[] = ["queued", "fingerprinted", "duplicate-decision", "waiting-duplicate-choice", "waiting-bfm-note", "processing", "writing"];
+        const validShutdownStages: ShutdownProtectionStage[] = ["queued", "fingerprinted", "companion-note", "duplicate-decision", "waiting-duplicate-choice", "processing", "writing"];
         if (!Array.isArray(this.settings.protectedJobs)) {
             this.settings.protectedJobs = [];
         } else {
@@ -7492,14 +9638,18 @@ ${frontmatterLines}
             const normalizeProtectedJobSource = (source: unknown): ProtectedJobSource => source === "manual-vault-reprocess" ? "manual-vault-reprocess" : "shutdown";
             this.settings.protectedJobs = this.settings.protectedJobs
                 .filter(job => job && typeof job.path === "string" && job.path.trim().length > 0 && (job as { source?: unknown }).source !== "forget-all")
-                .map(job => ({
-                    ...job,
-                    path: job.path.trim(),
-                    stage: validShutdownStages.includes(job.stage) ? job.stage : "queued",
-                    queuedAt: typeof job.queuedAt === "number" ? job.queuedAt : Date.now(),
-                    updatedAt: typeof job.updatedAt === "number" ? job.updatedAt : Date.now(),
-                    source: normalizeProtectedJobSource(job.source),
-                }))
+                .map(job => {
+                    const rawStage = (job as { stage?: unknown }).stage;
+                    const normalizedStage = rawStage === "waiting-bfm-note" ? "companion-note" : rawStage;
+                    return {
+                        ...job,
+                        path: job.path.trim(),
+                        stage: validShutdownStages.includes(normalizedStage as ShutdownProtectionStage) ? normalizedStage as ShutdownProtectionStage : "queued",
+                        queuedAt: typeof job.queuedAt === "number" ? job.queuedAt : Date.now(),
+                        updatedAt: typeof job.updatedAt === "number" ? job.updatedAt : Date.now(),
+                        source: normalizeProtectedJobSource(job.source),
+                    };
+                })
                 .filter(job => {
                     if (seenProtectedJobs.has(job.path)) return false;
                     seenProtectedJobs.add(job.path);
@@ -7515,29 +9665,46 @@ ${frontmatterLines}
         if (typeof this.settings.basePath !== "string" || this.settings.basePath.trim().length === 0) {
             this.settings.basePath = DEFAULT_SETTINGS.basePath;
         }
-        if (typeof this.settings.bfmNewFileLocation !== "string" || this.settings.bfmNewFileLocation.trim().length === 0) {
-            this.settings.bfmNewFileLocation = DEFAULT_SETTINGS.bfmNewFileLocation;
+        this.settings.moveOutsideFilesToBasePath = this.settings.moveOutsideFilesToBasePath === true;
+        if (typeof this.settings.companionNoteFolder !== "string" || this.settings.companionNoteFolder.trim().length === 0) {
+            this.settings.companionNoteFolder = DEFAULT_SETTINGS.companionNoteFolder;
         }
         if (typeof this.settings.ollamaBaseUrl !== "string" || this.settings.ollamaBaseUrl.trim().length === 0) {
             this.settings.ollamaBaseUrl = DEFAULT_SETTINGS.ollamaBaseUrl;
         }
-        if (typeof this.settings.bfmFileNameFormat !== "string" || this.settings.bfmFileNameFormat.trim().length === 0) {
-            this.settings.bfmFileNameFormat = DEFAULT_SETTINGS.bfmFileNameFormat;
+        if (typeof this.settings.companionNoteNameFormat !== "string" || this.settings.companionNoteNameFormat.trim().length === 0) {
+            this.settings.companionNoteNameFormat = DEFAULT_SETTINGS.companionNoteNameFormat;
         }
         this.settings.folderPropertyMappings = this.normalizeFolderPropertyMappings(this.settings.folderPropertyMappings);
         if (this.settings.folderPropertyMappings.length === 0) {
             this.settings.folderPropertyMappings = DEFAULT_SETTINGS.folderPropertyMappings.map(mapping => ({ ...mapping, values: [...mapping.values] }));
         }
+        this.settings.folderPropertyManualValueMemory = this.normalizeFolderPropertyManualValueMemory(
+            this.settings.folderPropertyManualValueMemory
+        );
+        this.rememberManualFolderPropertyValuesFromMappings();
         this.settings.folderFallbackProperty = this.normalizeFolderFallbackProperty(this.settings.folderFallbackProperty);
         this.settings.folderFallbackFormat = typeof this.settings.folderFallbackFormat === "string" ? this.settings.folderFallbackFormat : DEFAULT_SETTINGS.folderFallbackFormat;
-        this.settings.folderFallbackUseAsAiCandidate = this.settings.folderFallbackUseAsAiCandidate !== false;
-        this.settings.folderFallbackUseAsVaultCandidate = this.settings.folderFallbackUseAsVaultCandidate !== false;
-        if (this.settings.templateSource !== "internal" && this.settings.templateSource !== "bfm-templater") {
+        this.settings.folderFallbackAiCandidateMode = this.normalizeCandidateMode(
+            this.settings.folderFallbackAiCandidateMode,
+            this.settings.folderFallbackUseAsAiCandidate === false
+                ? "disabled"
+                : DEFAULT_SETTINGS.folderFallbackAiCandidateMode
+        );
+        this.settings.folderFallbackUseAsAiCandidate = this.isCandidateSourceActive(this.settings.folderFallbackAiCandidateMode);
+        this.settings.folderFallbackUseAsVaultCandidate = this.settings.folderFallbackUseAsVaultCandidate === true;
+        if (this.settings.templateSource !== "internal" && this.settings.templateSource !== "template-file") {
             this.settings.templateSource = DEFAULT_SETTINGS.templateSource;
         }
         if (typeof this.settings.frontmatterTemplate !== "string") {
             this.settings.frontmatterTemplate = DEFAULT_SETTINGS.frontmatterTemplate;
         }
+        this.settings.frontmatterTemplate = this.removeLegacyTemplateOverwritePlaceholders(
+            this.settings.frontmatterTemplate
+        );
+        this.settings.templateFilePath = typeof this.settings.templateFilePath === "string"
+            ? this.normalizeVaultPath(this.settings.templateFilePath)
+            : DEFAULT_SETTINGS.templateFilePath;
         this.settings.useFolderTags = this.settings.useFolderTags !== false;
         this.settings.writeImageEmbedInBody = this.settings.writeImageEmbedInBody !== false;
         this.settings.geolocationEnabled = this.settings.geolocationEnabled !== false;
@@ -7610,14 +9777,43 @@ ${frontmatterLines}
                 }));
         }
         this.backfillPairRecordsFromDuplicateRecords();
-        const validCandidateModes = ["disabled", "consider", "all", "exclude"];
-        if (!validCandidateModes.includes(this.settings.filenameCandidateMode)) {
+        if (!this.isValidCandidateMode(this.settings.filenameCandidateMode)) {
             this.settings.filenameCandidateMode = DEFAULT_SETTINGS.filenameCandidateMode;
         }
-        if (!validCandidateModes.includes(this.settings.folderTagsCandidateMode)) {
-            this.settings.folderTagsCandidateMode = DEFAULT_SETTINGS.folderTagsCandidateMode;
-        }
+        this.settings.filenameCandidatesHumanReadableOnly = this.settings.filenameCandidatesHumanReadableOnly !== false;
         this.settings.bridgeUsePreBridgeVaultAwarenessOutput = this.settings.bridgeUsePreBridgeVaultAwarenessOutput !== false;
+        this.settings.learnedVaultRelationCacheLimit = this.clampSetting(
+            this.settings.learnedVaultRelationCacheLimit,
+            DEFAULT_SETTINGS.learnedVaultRelationCacheLimit,
+            50,
+            5000
+        );
+        const learnedRelationKeys = new Set<string>();
+        this.settings.learnedVaultRelations = Array.isArray(this.settings.learnedVaultRelations)
+            ? this.settings.learnedVaultRelations
+                .filter(relation => relation && typeof relation.evidence === "string" && typeof relation.candidate === "string")
+                .map(relation => ({
+                    evidence: this.normalizeAiTagName(relation.evidence),
+                    candidate: this.normalizeAiTagName(relation.candidate),
+                    relationType: typeof relation.relationType === "string" && relation.relationType.trim()
+                        ? relation.relationType.trim().toLowerCase()
+                        : "related",
+                    model: typeof relation.model === "string" ? relation.model : "",
+                    confirmations: this.clampSetting(relation.confirmations, 1, 1, Number.MAX_SAFE_INTEGER),
+                    createdAt: typeof relation.createdAt === "number" ? relation.createdAt : Date.now(),
+                    lastConfirmedAt: typeof relation.lastConfirmedAt === "number" ? relation.lastConfirmedAt : Date.now(),
+                    lastUsedAt: typeof relation.lastUsedAt === "number" ? relation.lastUsedAt : 0,
+                }))
+                .filter(relation => {
+                    if (!relation.evidence || !relation.candidate) return false;
+                    const key = `${relation.evidence.toLowerCase()}\n${relation.candidate.toLowerCase()}`;
+                    if (learnedRelationKeys.has(key)) return false;
+                    learnedRelationKeys.add(key);
+                    return true;
+                })
+                .sort((a, b) => b.lastConfirmedAt - a.lastConfirmedAt)
+                .slice(0, this.settings.learnedVaultRelationCacheLimit)
+            : [];
 
         this.settings.parallelWorkers = this.clampSetting(
             this.settings.parallelWorkers,
@@ -7625,26 +9821,23 @@ ${frontmatterLines}
             1,
             16
         );
-        if (loadedSettings?.bfmNoteMaxWaitMs === 15000) {
-            this.settings.bfmNoteMaxWaitMs = DEFAULT_SETTINGS.bfmNoteMaxWaitMs;
-        }
-        this.settings.bfmNoteMaxWaitMs = this.clampSetting(
-            this.settings.bfmNoteMaxWaitMs,
-            DEFAULT_SETTINGS.bfmNoteMaxWaitMs,
-            500,
-            30000
-        );
-        this.settings.bfmNotePollIntervalMs = this.clampSetting(
-            this.settings.bfmNotePollIntervalMs,
-            DEFAULT_SETTINGS.bfmNotePollIntervalMs,
-            100,
-            5000
-        );
         this.settings.queueBatchMaxWaitMs = this.clampSetting(
             this.settings.queueBatchMaxWaitMs,
             DEFAULT_SETTINGS.queueBatchMaxWaitMs,
             1000,
             60000
+        );
+        this.settings.companionNoteCreationRetries = this.clampSetting(
+            this.settings.companionNoteCreationRetries,
+            DEFAULT_SETTINGS.companionNoteCreationRetries,
+            0,
+            5
+        );
+        this.settings.retryInitialWaitSeconds = this.clampSetting(
+            this.settings.retryInitialWaitSeconds,
+            DEFAULT_SETTINGS.retryInitialWaitSeconds,
+            1,
+            30
         );
         this.settings.maxProcessingAttempts = this.clampSetting(
             this.settings.maxProcessingAttempts,
@@ -7669,9 +9862,6 @@ ${frontmatterLines}
         this.settings.vaultAwarenessOutputPropertyName = this.normalizePropertyName(this.settings.vaultAwarenessOutputPropertyName, DEFAULT_SETTINGS.vaultAwarenessOutputPropertyName);
         this.settings.vaultAwarenessOutputFormat = typeof this.settings.vaultAwarenessOutputFormat === "string" ? this.settings.vaultAwarenessOutputFormat : DEFAULT_SETTINGS.vaultAwarenessOutputFormat;
         this.settings.vaultAwarenessOutputExclusive = this.settings.vaultAwarenessOutputExclusive === true;
-        this.settings.clearDropdownExcludedProperties = Array.isArray(this.settings.clearDropdownExcludedProperties)
-            ? Array.from(new Set(this.settings.clearDropdownExcludedProperties.map(property => this.normalizePropertyName(property, "")).filter(Boolean))).sort((a, b) => a.localeCompare(b))
-            : DEFAULT_SETTINGS.clearDropdownExcludedProperties;
         this.settings.hideLimitedFileTypeWarnings = this.settings.hideLimitedFileTypeWarnings !== false;
         const loadedLimitedFileTypeWarningSkips = this.settings.limitedFileTypeWarningSkips;
         const normalizedLimitedFileTypeWarningSkips: Record<string, boolean> = {};
@@ -7694,9 +9884,31 @@ ${frontmatterLines}
         this.settings.embedPropertyName = this.normalizePropertyName(this.settings.embedPropertyName, DEFAULT_SETTINGS.embedPropertyName);
         this.settings.aiTagsPropertyName = this.normalizePropertyName(this.settings.aiTagsPropertyName, DEFAULT_SETTINGS.aiTagsPropertyName);
         this.settings.aiTagsFormat = typeof this.settings.aiTagsFormat === "string" ? this.settings.aiTagsFormat : DEFAULT_SETTINGS.aiTagsFormat;
+        this.settings.removeFolderTagsFromAiTags = this.settings.removeFolderTagsFromAiTags !== false;
+        this.settings.removeGeolocationFromAiTags = this.settings.removeGeolocationFromAiTags !== false;
         this.settings.aiTagsUseAsVaultCandidate = this.settings.aiTagsUseAsVaultCandidate !== false;
         this.settings.aiDescriptionPropertyName = this.normalizePropertyName(this.settings.aiDescriptionPropertyName, DEFAULT_SETTINGS.aiDescriptionPropertyName);
-        this.settings.useGeolocationForAiDescription = this.settings.useGeolocationForAiDescription !== false;
+        const hasMergedGeolocationAiSetting = !!loadedSettings
+            && Object.prototype.hasOwnProperty.call(loadedSettings, "useGeolocationForAiTags");
+        const useGeolocationForAi = hasMergedGeolocationAiSetting
+            ? this.settings.useGeolocationForAiTags !== false
+            : this.settings.useGeolocationForAiDescription !== false;
+        this.settings.useGeolocationForAiDescription = useGeolocationForAi;
+        this.settings.useGeolocationForAiTags = useGeolocationForAi;
+        this.settings.imageAnalysisEnabled = this.settings.imageAnalysisEnabled !== false;
+        this.settings.ollamaVisionModel = typeof this.settings.ollamaVisionModel === "string" && this.settings.ollamaVisionModel.trim()
+            ? this.settings.ollamaVisionModel.trim()
+            : DEFAULT_SETTINGS.ollamaVisionModel;
+        this.settings.ollamaVisionPrompt = typeof this.settings.ollamaVisionPrompt === "string" && this.settings.ollamaVisionPrompt.trim()
+            ? this.settings.ollamaVisionPrompt.trim()
+            : DEFAULT_SETTINGS.ollamaVisionPrompt;
+        this.settings.aiDescriptionMinimumWords = this.clampSetting(
+            this.settings.aiDescriptionMinimumWords,
+            DEFAULT_SETTINGS.aiDescriptionMinimumWords,
+            20,
+            500
+        );
+        this.settings.bridgeRules = typeof this.settings.bridgeRules === "string" ? this.settings.bridgeRules : DEFAULT_SETTINGS.bridgeRules;
         const parsedOllamaTagsCap = Number(this.settings.ollamaGeneratedTagsCap);
         this.settings.ollamaGeneratedTagsCap = Number.isFinite(parsedOllamaTagsCap) && parsedOllamaTagsCap >= 0
             ? Math.round(parsedOllamaTagsCap)
@@ -7706,8 +9918,15 @@ ${frontmatterLines}
     }
 
     async saveSettings() {
-        await this.syncActiveSettingsProfileBeforeSave();
-        await this.saveData(this.settings);
+        this.invalidateExpensiveHealthCounts();
+        const saveOperation = this.settingsSaveChain
+            .catch(error => console.warn("Autotag recovered from an earlier settings save failure", error))
+            .then(async () => {
+                await this.syncActiveSettingsProfileBeforeSave();
+                await this.saveData(this.settings);
+            });
+        this.settingsSaveChain = saveOperation;
+        await saveOperation;
     }
 }
 
@@ -7715,7 +9934,7 @@ ${frontmatterLines}
 class DuplicateDecisionModal extends Modal {
     constructor(
         app: App,
-        private readonly plugin: BfmAutotagPlugin,
+        private readonly plugin: AutotagPlugin,
         private readonly file: TFile,
         private readonly notePath: string,
         private readonly match: DuplicateMatch,
@@ -7755,7 +9974,7 @@ class DuplicateDecisionModal extends Modal {
             ?? activePair?.expectedNotePath
             ?? this.notePath;
 
-        const image = this.plugin.app.vault.getAbstractFileByPath(imagePath);
+        const image = this.plugin.getVaultFileByPathFlexible(imagePath);
         const pair = this.plugin.getPairRecordForImagePath(imagePath) ?? this.plugin.getPairRecordForNotePath(notePath);
         if (pair?.imagePath) imagePath = pair.imagePath;
         if (pair?.notePath) notePath = pair.notePath;
@@ -7769,23 +9988,28 @@ class DuplicateDecisionModal extends Modal {
     }
 
     private getComparisonProcessingStatus(imagePath: string, notePath: string, role: "existing" | "new"): { label: string; tone: HealthCheckTone | "accent"; spinner?: boolean } {
-        const image = this.plugin.app.vault.getAbstractFileByPath(imagePath);
-        const note = this.plugin.app.vault.getAbstractFileByPath(notePath);
+        const image = this.plugin.getVaultFileByPathFlexible(imagePath);
+        const note = this.plugin.getVaultFileByPathFlexible(notePath);
         const failedFile = this.plugin.getFailedFile(imagePath);
         const protectedJob = this.plugin.getProtectedJob(imagePath);
-        const duplicateRecord = this.plugin.getDuplicateRecords().find(record => record.filePath === imagePath || record.notePath === notePath);
+        const duplicateRecord = this.plugin.getDuplicateRecords().find(record =>
+            this.plugin.areVaultPathsSame(record.filePath, imagePath)
+            || this.plugin.areVaultPathsSame(record.notePath, notePath)
+        );
         const activelyProcessing = this.plugin.isPathActivelyProcessing(imagePath) || this.plugin.isPathActivelyProcessing(notePath);
         const pendingAction = role === "new" && this.runId ? this.plugin.pendingDuplicateActions.get(this.runId) : null;
 
         if (!(image instanceof TFile)) return { label: "Image missing", tone: "danger" };
         if (!(note instanceof TFile)) return { label: "Waiting for companion note", tone: "warning", spinner: activelyProcessing };
+        if (role === "existing" && (this.plugin.settings.processedFiles.some(processedPath => this.plugin.areVaultPathsSame(processedPath, imagePath)) || duplicateRecord)) {
+            return { label: "Processed", tone: "success" };
+        }
         if (role === "new" && pendingAction?.processingComplete) return { label: "Processed", tone: "success" };
         if (role === "new" && protectedJob?.stage === "waiting-duplicate-choice") return { label: "Processed", tone: "success" };
         if (role === "new" && protectedJob?.stage === "duplicate-decision" && this.plugin.settings.waitForDuplicateSourceProcessing) return { label: "Waiting for decision", tone: "warning" };
         if (activelyProcessing) return { label: "Processing", tone: "accent", spinner: true };
         if (failedFile) return { label: `Failed after ${failedFile.attempts} attempt${failedFile.attempts === 1 ? "" : "s"}`, tone: "danger" };
-        if (this.plugin.settings.processedFiles.includes(imagePath)) return { label: "Processed", tone: "success" };
-        if (role === "existing" && duplicateRecord) return { label: "Processed", tone: "success" };
+        if (this.plugin.settings.processedFiles.some(processedPath => this.plugin.areVaultPathsSame(processedPath, imagePath))) return { label: "Processed", tone: "success" };
         if (protectedJob) return { label: `Queued: ${protectedJob.stage.replace(/-/g, " ")}`, tone: "warning" };
         if (duplicateRecord) return { label: "Indexed for duplicate protection", tone: "neutral" };
         return { label: "Unprocessed", tone: "neutral" };
@@ -7803,7 +10027,7 @@ class DuplicateDecisionModal extends Modal {
         ]);
         statusEl.addClass(`is-${status.tone}`);
         if (status.spinner) {
-            const spinnerEl = statusEl.createSpan({ cls: "bfm-autotag-duplicate-status-spinner" });
+            const spinnerEl = statusEl.createSpan({ cls: "autotag-duplicate-status-spinner" });
             setIcon(spinnerEl, "loader-circle");
         }
         statusEl.createSpan({ text: status.label });
@@ -7845,8 +10069,8 @@ class DuplicateDecisionModal extends Modal {
         contentEl.style.maxWidth = "none";
 
         const explanation = this.match.type === "exact"
-            ? "This file has the same exact content hash as an already processed image. Compare both sides before choosing how Maru\'s Autotag should continue."
-            : `This file looks visually similar to an already processed image (${this.match.similarity ?? "unknown"}% similarity). Compare both sides before choosing how Maru\'s Autotag should continue.`;
+            ? "This file has the same exact content hash as an already processed image. Compare both sides before choosing how Autotag should continue."
+            : `This file looks visually similar to an already processed image (${this.match.similarity ?? "unknown"}% similarity). Compare both sides before choosing how Autotag should continue.`;
         const header = contentEl.createDiv();
         header.style.background = "#ffe3e3";
         header.style.color = "#7f1d1d";
@@ -7972,9 +10196,9 @@ class DuplicateDecisionModal extends Modal {
             card.style.background = "var(--background-secondary)";
 
             card.createEl("h3", { text: title });
-            const statusWrap = card.createDiv({ cls: "bfm-autotag-duplicate-processing-status-wrap" });
-            statusWrap.createSpan({ text: "Status: ", cls: "bfm-autotag-duplicate-processing-status-label" });
-            const statusEl = statusWrap.createSpan({ cls: "bfm-autotag-duplicate-processing-status" });
+            const statusWrap = card.createDiv({ cls: "autotag-duplicate-processing-status-wrap" });
+            statusWrap.createSpan({ text: "Status: ", cls: "autotag-duplicate-processing-status-label" });
+            const statusEl = statusWrap.createSpan({ cls: "autotag-duplicate-processing-status" });
             const initialPaths = getCurrentPaths();
             this.renderComparisonProcessingStatus(statusEl, initialPaths.imagePath, initialPaths.notePath, role);
 
@@ -7991,7 +10215,7 @@ class DuplicateDecisionModal extends Modal {
                 if (renderedImagePath === currentImagePath) return;
                 renderedImagePath = currentImagePath;
                 imageWrap.empty();
-                const currentImageFile = this.plugin.app.vault.getAbstractFileByPath(currentImagePath);
+                const currentImageFile = this.plugin.getVaultFileByPathFlexible(currentImagePath);
                 if (!(currentImageFile instanceof TFile)) {
                     const missing = imageWrap.createDiv({ text: "Image file not found." });
                     missing.style.padding = "12px";
@@ -8014,7 +10238,7 @@ class DuplicateDecisionModal extends Modal {
             const metadataSection = createAnimatedSection(card, "Image and companion metadata", body => {
                 imagePathSpan = createMetaLine(body, "Image", initialPaths.imagePath);
                 notePathSpan = createMetaLine(body, "Companion", initialPaths.notePath);
-                const initialNote = this.plugin.app.vault.getAbstractFileByPath(initialPaths.notePath);
+                const initialNote = this.plugin.getVaultFileByPathFlexible(initialPaths.notePath);
                 companionStatusSpan = createMetaLine(body, "Companion status", initialNote instanceof TFile ? "exists" : "missing or not created yet");
                 pairIdSpan = createMetaLine(body, "Pair ID", pairId ?? "not recorded yet");
             });
@@ -8037,7 +10261,7 @@ class DuplicateDecisionModal extends Modal {
                 const currentPaths = getCurrentPaths();
                 renderImagePreview(currentPaths.imagePath);
                 this.renderComparisonProcessingStatus(statusEl, currentPaths.imagePath, currentPaths.notePath, role);
-                const refreshedNote = this.plugin.app.vault.getAbstractFileByPath(currentPaths.notePath);
+                const refreshedNote = this.plugin.getVaultFileByPathFlexible(currentPaths.notePath);
                 if (imagePathSpan) imagePathSpan.setText(currentPaths.imagePath);
                 if (notePathSpan) notePathSpan.setText(currentPaths.notePath);
                 if (companionStatusSpan) {
@@ -8187,7 +10411,7 @@ class DuplicateDecisionModal extends Modal {
         this.stopLiveRefresh();
         this.contentEl.empty();
         if (!this.decisionMade) {
-            new Notice("Choose a duplicate action before Maru\'s Autotag can continue.");
+            new Notice("Choose a duplicate action before Autotag can continue.");
             window.setTimeout(() => this.open(), 50);
         }
     }
@@ -8243,7 +10467,7 @@ class ConfirmDeleteFolderPropertyMappingModal extends Modal {
         contentEl.empty();
         contentEl.createEl("h2", { text: "Delete property list?" });
         contentEl.createEl("p", {
-            text: `This removes the '${this.propertyName}' folder mapping from Maru\'s Autotag settings. Existing generated notes are not changed.`,
+            text: `This removes the '${this.propertyName}' folder mapping from Autotag settings. Existing generated notes are not changed.`,
         });
 
         new Setting(contentEl)
@@ -8302,7 +10526,7 @@ class ConfirmDestructiveActionModal extends Modal {
 class LimitedFileTypeWarningModal extends Modal {
     constructor(
         app: App,
-        private readonly plugin: BfmAutotagPlugin,
+        private readonly plugin: AutotagPlugin,
         private readonly warning: LimitedFileTypeWarningDefinition,
         private readonly file: TFile,
         private readonly onClosed: () => void
@@ -8352,7 +10576,7 @@ class ManualPairConfirmationModal extends Modal {
 
     constructor(
         app: App,
-        private readonly plugin: BfmAutotagPlugin,
+        private readonly plugin: AutotagPlugin,
         private readonly image: TFile,
         private readonly note: TFile,
         private readonly willQueue: boolean,
@@ -8368,7 +10592,7 @@ class ManualPairConfirmationModal extends Modal {
     }
 
     private createMetaLine(parent: HTMLElement, label: string, value: string): void {
-        const row = parent.createDiv({ cls: "bfm-autotag-manual-pair-meta-line" });
+        const row = parent.createDiv({ cls: "autotag-manual-pair-meta-line" });
         row.createEl("strong", { text: `${label}: ` });
         row.createSpan({ text: value });
     }
@@ -8381,7 +10605,7 @@ class ManualPairConfirmationModal extends Modal {
 
         const imagePair = this.plugin.getPairRecordForPath(this.image.path);
         const notePair = this.plugin.getPairRecordForPath(this.note.path);
-        const expectedNotePath = this.plugin.getBfmNotePath(this.image);
+        const expectedNotePath = this.plugin.getCompanionNotePath(this.image);
         const noteContent = await this.plugin.getCompanionNoteContent(this.note.path);
 
         contentEl.createEl("h2", { text: "Confirm Manual Pairing" });
@@ -8392,11 +10616,11 @@ class ManualPairConfirmationModal extends Modal {
             cls: "setting-item-description",
         });
 
-        const previewRow = contentEl.createDiv({ cls: "bfm-autotag-manual-pair-preview-row" });
+        const previewRow = contentEl.createDiv({ cls: "autotag-manual-pair-preview-row" });
 
-        const imageCard = previewRow.createDiv({ cls: "bfm-autotag-manual-pair-card bfm-autotag-manual-pair-card-source" });
+        const imageCard = previewRow.createDiv({ cls: "autotag-manual-pair-card autotag-manual-pair-card-source" });
         imageCard.createEl("h3", { text: "Image / Source File" });
-        const imageWrap = imageCard.createDiv({ cls: "bfm-autotag-manual-pair-image-wrap" });
+        const imageWrap = imageCard.createDiv({ cls: "autotag-manual-pair-image-wrap" });
         const imageEl = imageWrap.createEl("img", {
             attr: {
                 src: this.app.vault.getResourcePath(this.image),
@@ -8405,7 +10629,7 @@ class ManualPairConfirmationModal extends Modal {
         });
         const imageFallbackEl = imageWrap.createDiv({
             text: "Preview unavailable for this file type.",
-            cls: "bfm-autotag-manual-pair-preview-fallback",
+            cls: "autotag-manual-pair-preview-fallback",
         });
         imageFallbackEl.hide();
         imageEl.onerror = () => {
@@ -8417,7 +10641,7 @@ class ManualPairConfirmationModal extends Modal {
         this.createMetaLine(imageCard, "Current Pair ID", imagePair?.pairId ?? "unpaired");
         this.createMetaLine(imageCard, "Expected companion", expectedNotePath);
 
-        const noteCard = previewRow.createDiv({ cls: "bfm-autotag-manual-pair-card bfm-autotag-manual-pair-card-note" });
+        const noteCard = previewRow.createDiv({ cls: "autotag-manual-pair-card autotag-manual-pair-card-note" });
         noteCard.createEl("h3", { text: "Companion Note" });
         this.createMetaLine(noteCard, "Path", this.note.path);
         this.createMetaLine(noteCard, "Current Pair ID", notePair?.pairId ?? "unpaired");
@@ -8425,7 +10649,7 @@ class ManualPairConfirmationModal extends Modal {
         if (imagePair?.pairId && notePair?.pairId && imagePair.pairId !== notePair.pairId) {
             const warningEl = noteCard.createDiv({
                 text: "Both files already belong to different pairs. Confirming will unpair their old partners and create one pair for these two files.",
-                cls: "bfm-autotag-manual-pair-warning",
+                cls: "autotag-manual-pair-warning",
             });
             warningEl.setAttr("aria-label", "Pairing warning");
         }
@@ -8433,7 +10657,7 @@ class ManualPairConfirmationModal extends Modal {
             text: noteContent.trim()
                 ? noteContent.slice(0, 1600) + (noteContent.length > 1600 ? "\n..." : "")
                 : "Companion note is empty.",
-            cls: "bfm-autotag-manual-pair-note-preview",
+            cls: "autotag-manual-pair-note-preview",
         });
         notePreviewEl.setAttr("aria-label", "Companion note preview");
 
@@ -8459,12 +10683,12 @@ class ManualPairConfirmationModal extends Modal {
     }
 }
 
-class BfmAutotagSettingTab extends PluginSettingTab {
-    plugin: BfmAutotagPlugin;
+class AutotagSettingTab extends PluginSettingTab {
+    plugin: AutotagPlugin;
     recentlyAddedPanelKeys = new Set<string>();
     infoScrollCloseHandlers: { target: EventTarget; handler: EventListener }[] = [];
 
-    constructor(app: App, plugin: BfmAutotagPlugin) {
+    constructor(app: App, plugin: AutotagPlugin) {
         super(app, plugin);
         this.plugin = plugin;
     }
@@ -8483,13 +10707,13 @@ class BfmAutotagSettingTab extends PluginSettingTab {
 
     applyRecentlyAddedPanelHighlight(el: HTMLElement, scope: string, id: string): void {
         if (this.recentlyAddedPanelKeys.has(this.getRecentlyAddedKey(scope, id))) {
-            el.addClass("bfm-autotag-newly-added-panel");
+            el.addClass("autotag-newly-added-panel");
         }
     }
 
     closeInfoDescriptions(containerEl: HTMLElement = this.containerEl): void {
         const controllers = Array.from(containerEl.querySelectorAll(".setting-item"))
-            .map(el => (el as any).__bfmAutotagInfoController)
+            .map(el => (el as any).__autotagInfoController)
             .filter(Boolean);
         controllers.forEach(controller => controller.close());
     }
@@ -8500,8 +10724,8 @@ class BfmAutotagSettingTab extends PluginSettingTab {
     }
 
     registerInfoCloseGuards(containerEl: HTMLElement): void {
-        if ((containerEl as any).__bfmAutotagInfoCloseGuardsAttached) return;
-        (containerEl as any).__bfmAutotagInfoCloseGuardsAttached = true;
+        if ((containerEl as any).__autotagInfoCloseGuardsAttached) return;
+        (containerEl as any).__autotagInfoCloseGuardsAttached = true;
         containerEl.addEventListener("mouseleave", () => this.closeInfoDescriptions(containerEl));
 
         const scrollTargets = new Set<EventTarget>([window]);
@@ -8520,30 +10744,140 @@ class BfmAutotagSettingTab extends PluginSettingTab {
         });
     }
 
+    dedupePropertyNames(properties: string[]): string[] {
+        return Array.from(new Set(properties.map(property => property.trim()).filter(Boolean)))
+            .sort((a, b) => a.localeCompare(b));
+    }
+
     attachTextSuggestions(inputEl: HTMLInputElement, suggestions: string[]): void {
-        const uniqueSuggestions = Array.from(new Set(suggestions.map(item => item.trim()).filter(Boolean)))
+        const uniqueSuggestions = this.dedupePropertyNames(suggestions)
             .sort((a, b) => a.localeCompare(b));
         if (uniqueSuggestions.length === 0) return;
-        const listId = `bfm-autotag-suggestions-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-        const listEl = document.createElement("datalist");
-        listEl.id = listId;
+
+        const anchorEl = inputEl.parentElement;
+        if (!anchorEl) return;
+        const menuId = `autotag-suggestions-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        inputEl.removeAttribute("list");
+        anchorEl.addClass("autotag-suggestion-anchor");
+        const menuEl = anchorEl.createDiv({ cls: "autotag-suggestion-menu" });
+        menuEl.id = menuId;
+        menuEl.setAttr("role", "listbox");
+        menuEl.style.display = "none";
+        let visibleSuggestions: string[] = [];
+        let activeIndex = -1;
+
+        const closeSuggestions = () => {
+            menuEl.style.display = "none";
+            menuEl.removeClass("is-open");
+            menuEl.empty();
+            visibleSuggestions = [];
+            activeIndex = -1;
+            anchorEl.removeClass("has-open-suggestions");
+            inputEl.setAttribute("aria-expanded", "false");
+            inputEl.removeAttribute("aria-activedescendant");
+        };
+        const positionSuggestions = () => {
+            const anchorRect = anchorEl.getBoundingClientRect();
+            const inputRect = inputEl.getBoundingClientRect();
+            menuEl.style.left = `${inputRect.left - anchorRect.left + anchorEl.scrollLeft}px`;
+            menuEl.style.top = `${inputRect.bottom - anchorRect.top + anchorEl.scrollTop + 4}px`;
+            menuEl.style.width = `${inputRect.width}px`;
+        };
+        const setActiveSuggestion = (index: number) => {
+            const options = Array.from(menuEl.querySelectorAll<HTMLElement>(".autotag-suggestion-option"));
+            if (options.length === 0) {
+                activeIndex = -1;
+                return;
+            }
+            activeIndex = Math.max(0, Math.min(index, options.length - 1));
+            options.forEach((optionEl, optionIndex) => {
+                const active = optionIndex === activeIndex;
+                optionEl.toggleClass("is-active", active);
+                optionEl.setAttr("aria-selected", active ? "true" : "false");
+            });
+            const activeOption = options[activeIndex];
+            inputEl.setAttribute("aria-activedescendant", activeOption.id);
+            activeOption.scrollIntoView({ block: "nearest" });
+        };
+        const selectSuggestion = (suggestion: string) => {
+            inputEl.value = suggestion;
+            inputEl.dispatchEvent(new Event("input", { bubbles: true }));
+            inputEl.dispatchEvent(new Event("change", { bubbles: true }));
+            closeSuggestions();
+            inputEl.focus();
+        };
         const refreshSuggestions = () => {
             const query = inputEl.value.trim().toLowerCase().replace(/\\/g, "/");
-            listEl.empty();
-            if (!query) return;
-            uniqueSuggestions
+            visibleSuggestions = query
+                ? uniqueSuggestions
                 .filter(suggestion => suggestion.toLowerCase().replace(/\\/g, "/").includes(query))
                 .slice(0, 50)
-                .forEach(suggestion => {
-                    const optionEl = document.createElement("option");
-                    optionEl.value = suggestion;
-                    listEl.appendChild(optionEl);
+                : [];
+            menuEl.empty();
+            activeIndex = -1;
+            if (visibleSuggestions.length === 0) {
+                closeSuggestions();
+                return;
+            }
+
+            document.querySelectorAll<HTMLElement>(".autotag-suggestion-menu.is-open")
+                .forEach(openMenuEl => {
+                    if (openMenuEl === menuEl) return;
+                    openMenuEl.style.display = "none";
+                    openMenuEl.removeClass("is-open");
+                    openMenuEl.parentElement?.removeClass("has-open-suggestions");
                 });
+            visibleSuggestions.forEach((suggestion, index) => {
+                const optionEl = menuEl.createEl("button", {
+                    text: suggestion,
+                    cls: "autotag-suggestion-option",
+                    attr: {
+                        id: `${menuId}-${index}`,
+                        type: "button",
+                        role: "option",
+                        "aria-selected": "false",
+                    },
+                });
+                optionEl.addEventListener("mouseenter", () => setActiveSuggestion(index));
+                optionEl.addEventListener("mousedown", event => {
+                    event.preventDefault();
+                    selectSuggestion(suggestion);
+                });
+            });
+            positionSuggestions();
+            menuEl.style.display = "block";
+            menuEl.addClass("is-open");
+            anchorEl.addClass("has-open-suggestions");
+            inputEl.setAttribute("aria-expanded", "true");
         };
-        inputEl.setAttribute("list", listId);
+        inputEl.setAttribute("autocomplete", "off");
+        inputEl.setAttribute("aria-autocomplete", "list");
+        inputEl.setAttribute("aria-controls", menuId);
+        inputEl.setAttribute("aria-expanded", "false");
         inputEl.addEventListener("input", refreshSuggestions);
-        refreshSuggestions();
-        inputEl.parentElement?.appendChild(listEl);
+        inputEl.addEventListener("focus", refreshSuggestions);
+        inputEl.addEventListener("keydown", event => {
+            if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                if (menuEl.style.display === "none") refreshSuggestions();
+                if (visibleSuggestions.length === 0) return;
+                event.preventDefault();
+                const direction = event.key === "ArrowDown" ? 1 : -1;
+                const nextIndex = activeIndex < 0
+                    ? (direction > 0 ? 0 : visibleSuggestions.length - 1)
+                    : (activeIndex + direction + visibleSuggestions.length) % visibleSuggestions.length;
+                setActiveSuggestion(nextIndex);
+                return;
+            }
+            if (event.key === "Enter" && activeIndex >= 0 && visibleSuggestions[activeIndex]) {
+                event.preventDefault();
+                selectSuggestion(visibleSuggestions[activeIndex]);
+                return;
+            }
+            if (event.key === "Escape") closeSuggestions();
+        });
+        inputEl.addEventListener("blur", () => {
+            window.setTimeout(closeSuggestions, 0);
+        });
     }
 
     getFolderPathSuggestions(): string[] {
@@ -8575,116 +10909,109 @@ class BfmAutotagSettingTab extends PluginSettingTab {
         return Array.from(properties).sort((a, b) => a.localeCompare(b));
     }
 
+    getObsidianUsedPropertyNames(): string[] {
+        return this.getAllFrontmatterProperties();
+    }
+
+    getConfiguredPluginPropertyNames(): string[] {
+        const properties = new Set<string>();
+        const add = (property: string | undefined | null) => {
+            const normalized = property?.trim();
+            if (normalized) properties.add(normalized);
+        };
+
+        if (this.plugin.settings.useFolderTags) {
+            this.plugin.getFolderPropertyMappings().forEach(mapping => add(mapping.property));
+            add(this.plugin.settings.folderFallbackProperty);
+        }
+        if (this.plugin.settings.linkToFilePropertyEnabled) add(this.plugin.getLinkToFilePropertyName());
+        if (this.plugin.settings.fileTypePropertyEnabled) add(this.plugin.getFileTypePropertyName());
+        if (this.plugin.settings.embedPropertyEnabled) add(this.plugin.getEmbedPropertyName());
+        if (this.plugin.settings.aiTagsPropertyEnabled) add(this.plugin.getAiTagsPropertyName());
+        if (this.plugin.settings.aiDescriptionPropertyEnabled) add(this.plugin.getAiDescriptionPropertyName());
+        if (this.plugin.settings.vaultAwarenessOutputEnabled) add(this.plugin.getVaultAwarenessOutputPropertyName());
+        if (this.plugin.settings.geolocationEnabled) this.plugin.getGeolocationPropertyNames().forEach(add);
+
+        return this.dedupePropertyNames(Array.from(properties));
+    }
+
     getPropertyNameSuggestions(detectedProperties: string[] = this.getDetectedFrontmatterProperties()): string[] {
-        return Array.from(new Set([
+        return this.dedupePropertyNames([
+            ...this.getConfiguredPluginPropertyNames(),
+            ...this.plugin.parseFrontmatterTemplateProperties(this.plugin.getFrontmatterPreviewTemplateText()),
             ...detectedProperties,
-            ...this.getAllFrontmatterProperties(),
-            ...this.plugin.getGeolocationPropertyNames(),
-            this.plugin.settings.folderFallbackProperty,
-            DEFAULT_SETTINGS.folderFallbackProperty,
-            DEFAULT_SETTINGS.linkToFilePropertyName,
-            DEFAULT_SETTINGS.fileTypePropertyName,
-            DEFAULT_SETTINGS.embedPropertyName,
-            DEFAULT_SETTINGS.aiTagsPropertyName,
-            DEFAULT_SETTINGS.aiDescriptionPropertyName,
-            this.plugin.getVaultAwarenessOutputPropertyName(),
-            DEFAULT_SETTINGS.vaultAwarenessOutputPropertyName,
-        ])).filter(Boolean).sort((a, b) => a.localeCompare(b));
+        ]);
+    }
+
+    getPropertyConfigurationLocations(property: string): { label: string; sectionId: string; anchorId: string }[] {
+        const target = property.trim();
+        const locations: { label: string; sectionId: string; anchorId: string }[] = [];
+        const add = (candidate: string, label: string, sectionId: string, anchorId: string) => {
+            if (candidate.trim() === target) locations.push({ label, sectionId, anchorId });
+        };
+
+        if (this.plugin.settings.linkToFilePropertyEnabled) {
+            add(this.plugin.getLinkToFilePropertyName(), "Properties > Link to file", "properties", "autotag-property-link-to-file");
+        }
+        if (this.plugin.settings.fileTypePropertyEnabled) {
+            add(this.plugin.getFileTypePropertyName(), "Properties > File type", "properties", "autotag-property-file-type");
+        }
+        if (this.plugin.settings.embedPropertyEnabled) {
+            add(this.plugin.getEmbedPropertyName(), "Properties > Embed", "properties", "autotag-property-embed");
+        }
+
+        if (this.plugin.settings.useFolderTags) {
+            this.plugin.getFolderPropertyMappings().forEach((mapping, index) => {
+                add(
+                    this.plugin.normalizeFolderFallbackProperty(mapping.property),
+                    `Folder Tags > Property ${index + 1}`,
+                    "folder-tags",
+                    `autotag-folder-property-${mapping.id}`
+                );
+            });
+            add(
+                this.plugin.normalizeFolderFallbackProperty(this.plugin.settings.folderFallbackProperty),
+                "Folder Tags > Fallback",
+                "folder-tags",
+                "autotag-folder-fallback-property"
+            );
+        }
+
+        if (this.plugin.settings.geolocationEnabled) {
+            this.plugin.getGeolocationProperties().forEach((mapping, index) => {
+                add(
+                    this.plugin.normalizePropertyName(mapping.property, this.plugin.getDefaultGeolocationPropertyName(mapping.field)),
+                    `Geolocation Tags > Property ${index + 1}`,
+                    "geolocation",
+                    `autotag-geolocation-property-${mapping.id}`
+                );
+            });
+        }
+
+        if ((this.plugin.settings.aiTaggingEnabled || this.plugin.canRunDirectBridgeOutput()) && this.plugin.settings.aiTagsPropertyEnabled) {
+            add(this.plugin.getAiTagsPropertyName(), "AI Tags > Generated tags", "ai-tags", "autotag-ai-tags-property");
+        }
+        if (this.plugin.settings.aiTaggingEnabled && this.plugin.settings.aiDescriptionPropertyEnabled) {
+            add(this.plugin.getAiDescriptionPropertyName(), "AI Tags > Image description", "ai-tags", "autotag-ai-description-property");
+        }
+        if (this.plugin.settings.aiTaggingEnabled && this.plugin.settings.vaultAwarenessEnabled && this.plugin.settings.vaultAwarenessOutputEnabled) {
+            add(
+                this.plugin.getVaultAwarenessOutputPropertyName(),
+                "Vault Awareness > Output",
+                "vault-awareness",
+                "autotag-vault-awareness-output-property"
+            );
+        }
+
+        return locations;
     }
 
     getDetectedFrontmatterProperties(): string[] {
-        const normalizeKey = (property: string) => property.trim().toLowerCase();
-        const managedProperties = new Set([
-            "position",
-            "linktofile",
-            "filetype",
-            "embed",
-            "lastModified",
-            "created",
-            "aitags",
-            "aidescription",
-            this.plugin.getLinkToFilePropertyName(),
-            this.plugin.getFileTypePropertyName(),
-            this.plugin.getEmbedPropertyName(),
-            this.plugin.getAiTagsPropertyName(),
-            this.plugin.getAiDescriptionPropertyName(),
-            this.plugin.getVaultAwarenessOutputPropertyName(),
-            ...this.plugin.getGeolocationPropertyNames(),
-        ].map(normalizeKey));
-        const extraExcludedProperties = new Set(this.plugin.settings.clearDropdownExcludedProperties.map(normalizeKey));
-        const properties = new Set<string>([
-            "domains",
-            "types",
-            "related",
-            "currentStatus",
-            "tags",
-        ]);
-
-        this.app.vault.getMarkdownFiles().forEach(file => {
-            const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
-            if (!frontmatter) return;
-
-            Object.keys(frontmatter).forEach(property => {
-                const trimmedProperty = property.trim();
-                if (!trimmedProperty) return;
-                const key = normalizeKey(trimmedProperty);
-                if (managedProperties.has(key) || extraExcludedProperties.has(key)) return;
-                properties.add(trimmedProperty);
-            });
-        });
-
-        return Array.from(properties).sort((a, b) => a.localeCompare(b));
-    }
-
-    renderClearDropdownExcludedProperties(containerEl: HTMLElement): void {
-        const clearDropdownPanelEl = containerEl.createDiv({ cls: "bfm-autotag-property-panel" });
-        clearDropdownPanelEl.createEl("h5", { text: "Clear Dropdown" });
-        clearDropdownPanelEl.createEl("p", {
-            text: "Autotag-managed properties are hidden automatically. Add extra properties here to hide noisy fields from this plugin's property dropdowns.",
-            cls: "setting-item-description",
-        });
-        this.plugin.settings.clearDropdownExcludedProperties.forEach(property => {
-            const excludedPropertySetting = new Setting(clearDropdownPanelEl)
-                .setName(property)
-                .setDesc("Hidden from property dropdowns in this plugin.")
-                .addButton(button => button
-                    .setIcon("trash")
-                    .setTooltip("Remove excluded property")
-                    .onClick(async () => {
-                        this.plugin.settings.clearDropdownExcludedProperties = this.plugin.settings.clearDropdownExcludedProperties.filter(candidate => candidate !== property);
-                        await this.plugin.saveSettings();
-                        this.refreshDisplayAnimated();
-                    }));
-            this.applyRecentlyAddedPanelHighlight(excludedPropertySetting.settingEl, "clear-dropdown-property", property);
-        });
-        let pendingExcludedProperty = "";
-        new Setting(clearDropdownPanelEl)
-            .setName("Add excluded property")
-            .setDesc("Example: excalidraw-plugin or excalidraw-open-md.")
-            .addText(text => {
-                this.attachTextSuggestions(text.inputEl, this.getAllFrontmatterProperties());
-                text.setPlaceholder("property-name")
-                .onChange(value => {
-                    pendingExcludedProperty = value;
-                });
-            })
-            .addButton(button => button
-                .setButtonText("Add Property")
-                .setCta()
-                .onClick(async () => {
-                    const property = this.plugin.normalizePropertyName(pendingExcludedProperty, "");
-                    if (!property || this.plugin.settings.clearDropdownExcludedProperties.includes(property)) return;
-                    this.markRecentlyAddedPanel("clear-dropdown-property", property);
-                    this.plugin.settings.clearDropdownExcludedProperties = [...this.plugin.settings.clearDropdownExcludedProperties, property]
-                        .sort((a, b) => a.localeCompare(b));
-                    await this.plugin.saveSettings();
-                    this.refreshDisplayAnimated();
-                }));
-
+        return this.dedupePropertyNames(this.getObsidianUsedPropertyNames());
     }
 
     renderLimitedFileTypeWarningSettings(containerEl: HTMLElement): void {
-        const warningPanelEl = containerEl.createDiv({ cls: "bfm-autotag-property-panel" });
+        const warningPanelEl = containerEl.createDiv({ cls: "autotag-property-panel" });
         warningPanelEl.createEl("h5", { text: "Limited File Type Warnings" });
         warningPanelEl.createEl("p", {
             text: "Some image-like formats can be stored and exact-hashed, but AI analysis, visual duplicate previews, or metadata extraction may depend on external support.",
@@ -8710,7 +11037,7 @@ class BfmAutotagSettingTab extends PluginSettingTab {
         const renderWarningControls = () => {
             warningControlsHostEl.empty();
             if (this.plugin.settings.hideLimitedFileTypeWarnings) return;
-            const controlsEl = this.createSettingsRevealContainer(warningControlsHostEl, "bfm-autotag-subcategory");
+            const controlsEl = this.createSettingsRevealContainer(warningControlsHostEl, "autotag-subcategory");
             LIMITED_FILE_TYPE_WARNINGS.forEach(definition => {
                 new Setting(controlsEl)
                     .setName(`Skip .${definition.extension} popup`)
@@ -8742,39 +11069,41 @@ class BfmAutotagSettingTab extends PluginSettingTab {
         containerEl.empty();
         const mappings = this.plugin.settings.folderPropertyMappings;
         mappings.forEach((mapping, index) => {
-            const propertyPanelEl = containerEl.createDiv({ cls: "bfm-autotag-property-panel" });
+            const propertyPanelEl = containerEl.createDiv({ cls: "autotag-property-panel" });
+            propertyPanelEl.id = `autotag-folder-property-${mapping.id}`;
             this.applyRecentlyAddedPanelHighlight(propertyPanelEl, "folder-property", mapping.id);
             propertyPanelEl.createEl("h5", { text: `Folder Property ${index + 1}` });
+
+            let renderValuesSetting: () => void = () => undefined;
+            const updateMappingProperty = async (value: string) => {
+                if (mapping.valueSource === "manual") {
+                    this.plugin.rememberFolderPropertyManualValues(mapping.property, mapping.values);
+                }
+                mapping.property = this.plugin.normalizeFolderFallbackProperty(value);
+                if (mapping.valueSource === "automatic") {
+                    this.plugin.syncAutomaticFolderPropertyMapping(mapping, true);
+                } else {
+                    mapping.values = this.plugin.getRememberedFolderPropertyManualValues(mapping.property) ?? [];
+                }
+                await this.plugin.saveSettings();
+                if (mapping.useAsVaultCandidate) this.plugin.scheduleVaultVocabularyCacheBuild();
+                renderValuesSetting();
+            };
             const setting = new Setting(propertyPanelEl)
                 .setName("Property")
-                .setDesc("Choose the property, enter matching folder names, and optionally format written values with example as the placeholder.");
+                .setDesc("Type any frontmatter property name or choose a searchable suggestion from the active template, detected vault properties, and plugin properties.");
 
-            setting.addDropdown(dropdown => {
-                const options = new Set([...detectedProperties, mapping.property]);
-                Array.from(options)
-                    .filter(Boolean)
-                    .sort((a, b) => a.localeCompare(b))
-                    .forEach(property => dropdown.addOption(property, property));
-                dropdown
+            let propertyUpdateTimer: number | null = null;
+            setting.addText(text => {
+                this.attachTextSuggestions(text.inputEl, this.getPropertyNameSuggestions(detectedProperties));
+                text.setPlaceholder(DEFAULT_SETTINGS.folderFallbackProperty)
                     .setValue(mapping.property)
-                    .onChange(async value => {
-                        mapping.property = this.plugin.normalizeFolderFallbackProperty(value);
-                        await this.plugin.saveSettings();
-                        if (mapping.useAsVaultCandidate) this.plugin.buildVaultVocabularyCache();
-                    });
-            });
-
-            setting.addTextArea(textArea => {
-                textArea.inputEl.rows = 2;
-                textArea
-                    .setPlaceholder("comma, separated")
-                    .setValue(mapping.values.join(", "))
-                    .onChange(async value => {
-                        mapping.values = value
-                            .split(",")
-                            .map(item => item.trim())
-                            .filter(Boolean);
-                        await this.plugin.saveSettings();
+                    .onChange(value => {
+                        if (propertyUpdateTimer !== null) window.clearTimeout(propertyUpdateTimer);
+                        propertyUpdateTimer = window.setTimeout(() => {
+                            propertyUpdateTimer = null;
+                            void updateMappingProperty(value);
+                        }, 250);
                     });
             });
 
@@ -8794,6 +11123,68 @@ class BfmAutotagSettingTab extends PluginSettingTab {
                     ).open();
                 }));
 
+            new Setting(propertyPanelEl)
+                .setName("Value source")
+                .setDesc("Manual uses the comma-separated list below. Automatic keeps this list updated from existing Obsidian values for the selected property; new values are added when Obsidian updates a changed note, without background polling.")
+                .addDropdown(dropdown => dropdown
+                    .addOption("manual", "Manual")
+                    .addOption("automatic", "Automatic")
+                    .setValue(mapping.valueSource ?? "manual")
+                    .onChange(async value => {
+                        const nextSource: FolderPropertyValueSource = value === "automatic" ? "automatic" : "manual";
+                        if (mapping.valueSource === nextSource) return;
+                        if (mapping.valueSource === "manual") {
+                            this.plugin.rememberFolderPropertyManualValues(mapping.property, mapping.values);
+                        }
+                        mapping.valueSource = nextSource;
+                        if (mapping.valueSource === "automatic") {
+                            this.plugin.syncAutomaticFolderPropertyMapping(mapping, true);
+                        } else {
+                            mapping.values = this.plugin.getRememberedFolderPropertyManualValues(mapping.property) ?? [];
+                        }
+                        await this.plugin.saveSettings();
+                        renderValuesSetting();
+                    }));
+
+            const valuesHostEl = propertyPanelEl.createDiv();
+            renderValuesSetting = () => {
+                valuesHostEl.empty();
+                const valuesSetting = new Setting(valuesHostEl)
+                    .setName(mapping.valueSource === "automatic" ? "Automatic values" : "Manual values")
+                    .setDesc(mapping.valueSource === "automatic"
+                        ? `Saved from Obsidian values for '${mapping.property}'. Current count: ${mapping.values.length}. New values are added when Obsidian reports a changed note.`
+                        : "Folder names that should be written to this property, separated by commas.");
+                valuesSetting.settingEl.addClass("autotag-folder-values-setting");
+                if (mapping.valueSource === "automatic") {
+                    const pillsEl = valuesSetting.controlEl.createDiv({ cls: "autotag-auto-values-pills" });
+                    if (mapping.values.length === 0) {
+                        pillsEl.createSpan({
+                            text: "No values detected yet",
+                            cls: "autotag-auto-values-empty",
+                        });
+                    } else {
+                        mapping.values.forEach(value => pillsEl.createSpan({
+                            text: value,
+                            cls: "autotag-auto-value-pill",
+                        }));
+                    }
+                } else {
+                    valuesSetting.addTextArea(textArea => {
+                        textArea.inputEl.rows = 2;
+                        textArea
+                            .setPlaceholder("comma, separated")
+                            .setValue(mapping.values.join(", "))
+                            .onChange(async value => {
+                                mapping.values = this.plugin.parseManualFolderPropertyValueInput(value);
+                                this.plugin.rememberFolderPropertyManualValues(mapping.property, mapping.values);
+                                await this.plugin.saveSettings();
+                            });
+                    });
+                }
+                this.enhanceInfoDescriptionAnimations(valuesHostEl);
+            };
+            renderValuesSetting();
+
             const formatSetting = new Setting(propertyPanelEl)
                 .setName("Folder Property Format")
                 .setDesc("Controls how this property list writes each matched folder value.");
@@ -8811,26 +11202,69 @@ class BfmAutotagSettingTab extends PluginSettingTab {
                     await this.plugin.saveSettings();
                 }));
 
-            new Setting(propertyPanelEl)
-                .setName("Use as AI candidates")
-                .setDesc("Allows values generated by this property list to be used by Folder Tags Candidate Mode.")
-                .addToggle(toggle => toggle
-                    .setValue(mapping.useAsAiCandidate)
-                    .onChange(async value => {
-                        mapping.useAsAiCandidate = value;
+            let mappingAiWarningHostEl: HTMLElement | null = null;
+            const renderMappingAiWarning = () => {
+                if (!mappingAiWarningHostEl) return;
+                mappingAiWarningHostEl.empty();
+                const mode = this.plugin.getFolderMappingAiCandidateMode(mapping);
+                this.renderInlineDependencyWarning(
+                    mappingAiWarningHostEl,
+                    "AI Tagging is off",
+                    this.plugin.isCandidateSourceActive(mode) && !this.plugin.settings.aiTaggingEnabled
+                        ? ["This folder property is set to feed AI Tags, but AI Tagging is currently disabled. Enable AI Tags or set this mode to Disabled."]
+                        : [],
+                    this.getSettingsSectionIcon("ai-tags")
+                );
+            };
+            this.setSettingNameWithIcon(
+                this.addCandidateModeDropdown(
+                    new Setting(propertyPanelEl)
+                        .setDesc("Controls how values generated by this folder property can influence AI Tags. All Keywords lets the value act as metadata evidence, Consider uses it only as a weak clue, Exclude keeps exact values out of AI Tags, and Disabled ignores it for AI."),
+                    this.plugin.getFolderMappingAiCandidateMode(mapping),
+                    async value => {
+                        mapping.aiCandidateMode = value;
+                        mapping.useAsAiCandidate = this.plugin.isCandidateSourceActive(value);
                         await this.plugin.saveSettings();
-                    }));
+                        this.animateInlineDependencyWarning(mappingAiWarningHostEl!, renderMappingAiWarning);
+                    }
+                ),
+                "AI candidate mode",
+                this.getSettingsSectionIcon("ai-tags")
+            );
+            mappingAiWarningHostEl = propertyPanelEl.createDiv();
+            renderMappingAiWarning();
 
-            new Setting(propertyPanelEl)
-                .setName("Use as Vault Awareness Candidates")
-                .setDesc("Allows values already written in this property to become known vocabulary for Vault Awareness.")
-                .addToggle(toggle => toggle
-                    .setValue(mapping.useAsVaultCandidate)
-                    .onChange(async value => {
-                        mapping.useAsVaultCandidate = value;
-                        await this.plugin.saveSettings();
-                        this.plugin.buildVaultVocabularyCache();
-                    }));
+            let mappingVaultWarningHostEl: HTMLElement | null = null;
+            const renderMappingVaultWarning = () => {
+                if (!mappingVaultWarningHostEl) return;
+                mappingVaultWarningHostEl.empty();
+                this.renderInlineDependencyWarning(
+                    mappingVaultWarningHostEl,
+                    "Advanced vocabulary source",
+                    this.getVaultVocabularyAdvancedWarningLines(
+                        mapping.useAsVaultCandidate,
+                        this.plugin.settings.vaultAwarenessEnabled,
+                        "property"
+                    ),
+                    this.getSettingsSectionIcon("vault-awareness")
+                );
+            };
+            mappingVaultWarningHostEl = propertyPanelEl.createDiv();
+            renderMappingVaultWarning();
+            this.setSettingNameWithIcon(
+                new Setting(propertyPanelEl)
+                    .setDesc("Scans this property across the whole vault. Every existing frontmatter value found there can become known vocabulary for Vault Awareness, not only values from the file currently being processed.")
+                    .addToggle(toggle => toggle
+                        .setValue(mapping.useAsVaultCandidate)
+                        .onChange(async value => {
+                            mapping.useAsVaultCandidate = value;
+                            await this.plugin.saveSettings();
+                            this.plugin.scheduleVaultVocabularyCacheBuild();
+                            this.animateInlineDependencyWarning(mappingVaultWarningHostEl!, renderMappingVaultWarning);
+                        })),
+                "Use property as Vault Awareness vocabulary",
+                this.getSettingsSectionIcon("vault-awareness")
+            );
         });
 
         new Setting(containerEl)
@@ -8846,9 +11280,11 @@ class BfmAutotagSettingTab extends PluginSettingTab {
                         id,
                         property: DEFAULT_SETTINGS.folderFallbackProperty,
                         values: [],
+                        valueSource: 'manual',
                         format: '',
+                        aiCandidateMode: 'all',
                         useAsAiCandidate: true,
-                        useAsVaultCandidate: true,
+                        useAsVaultCandidate: false,
                     });
                     await this.plugin.saveSettings();
                     this.animateSettingsContent(containerEl, rerender);
@@ -8907,12 +11343,12 @@ class BfmAutotagSettingTab extends PluginSettingTab {
             ? this.plugin.settings.hideBridgeLinguisticFeatures
             : this.plugin.settings.hideVaultLinguisticFeatures;
         if (hidden) return;
-        const bodyEl = this.createSettingsRevealContainer(containerEl, "bfm-autotag-subcategory");
+        const bodyEl = this.createSettingsRevealContainer(containerEl, "autotag-subcategory");
         this.addLinguisticFeatureToggles(bodyEl, scope);
     }
 
     createSettingsRevealContainer(containerEl: HTMLElement, extraClass = ""): HTMLElement {
-        const classes = ["bfm-autotag-animated-section-body", "is-open", ...extraClass.split(/\s+/).filter(Boolean)];
+        const classes = ["autotag-animated-section-body", "is-open", ...extraClass.split(/\s+/).filter(Boolean)];
         return containerEl.createDiv({ cls: classes.join(" ") });
     }
 
@@ -8922,30 +11358,36 @@ class BfmAutotagSettingTab extends PluginSettingTab {
     renderFormatPreview(containerEl: HTMLElement, label: string, format: string | undefined, hintMode: "visible" | "info" = "visible"): void {
         containerEl.empty();
         const hintText = "Use example, Example, or EXAMPLE to control casing; empty writes plain values.";
-        const previewEl = containerEl.createDiv({ cls: "bfm-autotag-format-preview" });
-        previewEl.createEl("span", { text: `${label}: `, cls: "bfm-autotag-format-preview-label" });
+        const previewEl = containerEl.createDiv({ cls: "autotag-format-preview" });
+        previewEl.createEl("span", { text: `${label}: `, cls: "autotag-format-preview-label" });
         if (hintMode === "info") {
-            const infoWrap = previewEl.createSpan({ cls: "bfm-autotag-format-preview-info-wrap" });
-            infoWrap.createSpan({ cls: "bfm-autotag-info-trigger", text: "i" });
-            infoWrap.createSpan({ cls: "bfm-autotag-format-preview-info", text: hintText });
+            const infoWrap = previewEl.createSpan({ cls: "autotag-format-preview-info-wrap" });
+            infoWrap.createSpan({ cls: "autotag-info-trigger", text: "i" });
+            infoWrap.createSpan({ cls: "autotag-format-preview-info", text: hintText });
         }
-        const markdownEl = previewEl.createDiv({ cls: "bfm-autotag-format-preview-markdown" });
-        void MarkdownRenderer.render(this.app, this.plugin.getFormatPreview(format), markdownEl, "", this.plugin);
+        const markdownEl = previewEl.createDiv({ cls: "autotag-format-preview-markdown" });
+        const previewValue = this.plugin.getFormatPreview(format);
+        if (/^\[\[[^\[\]]+\]\]$/.test(previewValue)) {
+            void MarkdownRenderer.render(this.app, previewValue, markdownEl, "", this.plugin);
+        } else {
+            markdownEl.setText(previewValue);
+        }
         if (hintMode === "visible") {
             containerEl.createDiv({
                 text: hintText,
-                cls: "bfm-autotag-format-preview-hint",
+                cls: "autotag-format-preview-hint",
             });
         }
     }
 
     getTemplatePropertySuggestionRefs(containerEl: HTMLElement): TemplatePropertySuggestionRefs {
-        const existing = (containerEl as any).__bfmAutotagTemplatePropertySuggestion as TemplatePropertySuggestionRefs | undefined;
+        const existing = (containerEl as any).__autotagTemplatePropertySuggestion as TemplatePropertySuggestionRefs | undefined;
         if (existing) return existing;
 
         containerEl.empty();
-        const panelEl = containerEl.createDiv({ cls: "bfm-autotag-frontmatter-check-panel is-clean bfm-autotag-template-suggestion-panel" });
-        const infoSettingEl = panelEl.createDiv({ cls: "setting-item bfm-autotag-frontmatter-check-info-setting" });
+        const panelEl = containerEl.createDiv({ cls: "autotag-frontmatter-check-panel is-clean autotag-template-suggestion-panel" });
+        panelEl.id = "autotag-properties-template-suggestions-warning";
+        const infoSettingEl = panelEl.createDiv({ cls: "setting-item autotag-frontmatter-check-info-setting" });
         const infoBodyEl = infoSettingEl.createDiv({ cls: "setting-item-info" });
         const nameEl = infoBodyEl.createDiv({ cls: "setting-item-name" });
         const titleTextEl = nameEl.createSpan();
@@ -8953,9 +11395,12 @@ class BfmAutotagSettingTab extends PluginSettingTab {
             text: "These are active Autotag output properties that can be placed in the selected template source. If you leave them undeclared, Autotag can still add them later.",
             cls: "setting-item-description",
         });
-        const listEl = panelEl.createEl("ul", { cls: "bfm-autotag-frontmatter-check-list" });
+        const controlEl = infoSettingEl.createDiv({ cls: "setting-item-control" });
+        const copyButtonEl = controlEl.createEl("button", { text: "Copy Properties" });
+        copyButtonEl.type = "button";
+        const listEl = panelEl.createEl("ul", { cls: "autotag-frontmatter-check-list" });
         const cleanTextEl = panelEl.createEl("p", {
-            cls: "setting-item-description bfm-autotag-frontmatter-check-clean-text",
+            cls: "setting-item-description autotag-frontmatter-check-clean-text",
         });
         this.enhanceInfoDescriptionAnimations(panelEl);
 
@@ -8964,13 +11409,18 @@ class BfmAutotagSettingTab extends PluginSettingTab {
             titleTextEl,
             listEl,
             cleanTextEl,
+            copyButtonEl,
         };
-        (containerEl as any).__bfmAutotagTemplatePropertySuggestion = refs;
+        (containerEl as any).__autotagTemplatePropertySuggestion = refs;
         return refs;
     }
 
     renderTemplatePropertySuggestionBox(containerEl: HTMLElement, animate = false): void {
         const refs = this.getTemplatePropertySuggestionRefs(containerEl);
+        const templateAvailable = this.plugin.isTemplateSourceAvailable();
+        containerEl.style.display = templateAvailable ? "" : "none";
+        if (!templateAvailable) return;
+
         const missingProperties = this.plugin.getMissingTemplateDeclarationProperties();
         const hasMissingProperties = missingProperties.length > 0;
         const updatePanel = () => {
@@ -8983,7 +11433,33 @@ class BfmAutotagSettingTab extends PluginSettingTab {
             refs.listEl.style.display = hasMissingProperties ? "" : "none";
             refs.cleanTextEl.style.display = hasMissingProperties ? "none" : "";
             refs.cleanTextEl.setText("The selected template source already includes every active Autotag output property.");
-            missingProperties.forEach(property => refs.listEl.createEl("li", { text: `${property}:` }));
+            refs.copyButtonEl.style.display = hasMissingProperties ? "" : "none";
+            refs.copyButtonEl.onclick = async () => {
+                const text = missingProperties.map(property => `${property}:`).join("\n");
+                if (!text) {
+                    new Notice("No undeclared properties to copy.");
+                    return;
+                }
+                await navigator.clipboard.writeText(text);
+                new Notice(`Copied ${missingProperties.length} undeclared propert${missingProperties.length === 1 ? "y" : "ies"}.`);
+            };
+            missingProperties.forEach(property => {
+                const itemEl = refs.listEl.createEl("li");
+                itemEl.createSpan({ text: `${property}:` });
+                const locations = this.getPropertyConfigurationLocations(property);
+                locations.forEach((location, index) => {
+                    itemEl.createSpan({ text: index === 0 ? " " : ", " });
+                    const locationButtonEl = itemEl.createEl("button", {
+                        text: `(${location.label})`,
+                        cls: "autotag-property-location-link",
+                    });
+                    locationButtonEl.type = "button";
+                    locationButtonEl.setAttr("aria-label", `Open ${location.label}`);
+                    locationButtonEl.addEventListener("click", () => {
+                        this.openSettingsProblemTarget(location.sectionId, location.anchorId);
+                    });
+                });
+            });
         };
 
         if (animate) {
@@ -8994,12 +11470,13 @@ class BfmAutotagSettingTab extends PluginSettingTab {
     }
 
     getGeneratedMarkdownPreviewRefs(containerEl: HTMLElement): GeneratedMarkdownPreviewRefs {
-        const existing = (containerEl as any).__bfmAutotagGeneratedMarkdownPreview as GeneratedMarkdownPreviewRefs | undefined;
+        const existing = (containerEl as any).__autotagGeneratedMarkdownPreview as GeneratedMarkdownPreviewRefs | undefined;
         if (existing) return existing;
 
         containerEl.empty();
-        const checkPanelEl = containerEl.createDiv({ cls: "bfm-autotag-frontmatter-check-panel is-clean" });
-        const infoSettingEl = checkPanelEl.createDiv({ cls: "setting-item bfm-autotag-frontmatter-check-info-setting" });
+        const checkPanelEl = containerEl.createDiv({ cls: "autotag-frontmatter-check-panel is-clean" });
+        checkPanelEl.id = "autotag-properties-template-check-warning";
+        const infoSettingEl = checkPanelEl.createDiv({ cls: "setting-item autotag-frontmatter-check-info-setting" });
         const infoBodyEl = infoSettingEl.createDiv({ cls: "setting-item-info" });
         const nameEl = infoBodyEl.createDiv({ cls: "setting-item-name" });
         const titleTextEl = nameEl.createSpan();
@@ -9007,19 +11484,20 @@ class BfmAutotagSettingTab extends PluginSettingTab {
             text: "Reasons may be: Spelling, or your intended purpose.",
             cls: "setting-item-description",
         });
-        const listEl = checkPanelEl.createEl("ul", { cls: "bfm-autotag-frontmatter-check-list" });
+        const listEl = checkPanelEl.createEl("ul", { cls: "autotag-frontmatter-check-list" });
         const cleanTextEl = checkPanelEl.createEl("p", {
-            cls: "setting-item-description bfm-autotag-frontmatter-check-clean-text",
+            cls: "setting-item-description autotag-frontmatter-check-clean-text",
         });
         this.enhanceInfoDescriptionAnimations(checkPanelEl);
 
-        const previewPanelEl = containerEl.createDiv({ cls: "bfm-autotag-property-panel bfm-autotag-markdown-note-preview-panel" });
+        const embedSettingHostEl = containerEl.createDiv({ cls: "autotag-image-embed-setting-host" });
+        const previewPanelEl = containerEl.createDiv({ cls: "autotag-property-panel autotag-markdown-note-preview-panel" });
         previewPanelEl.createEl("h5", { text: "Generated Markdown Preview" });
         previewPanelEl.createEl("p", {
             text: "Raw preview of the companion note after Autotag has applied the selected template source, generated properties, folder properties, geolocation properties, and note body setting.",
             cls: "setting-item-description",
         });
-        const preEl = previewPanelEl.createEl("pre", { cls: "bfm-autotag-markdown-note-preview" });
+        const preEl = previewPanelEl.createEl("pre", { cls: "autotag-markdown-note-preview" });
         const codeEl = preEl.createEl("code");
 
         const refs: GeneratedMarkdownPreviewRefs = {
@@ -9027,10 +11505,11 @@ class BfmAutotagSettingTab extends PluginSettingTab {
             titleTextEl,
             listEl,
             cleanTextEl,
+            embedSettingHostEl,
             previewPanelEl,
             codeEl,
         };
-        (containerEl as any).__bfmAutotagGeneratedMarkdownPreview = refs;
+        (containerEl as any).__autotagGeneratedMarkdownPreview = refs;
         return refs;
     }
 
@@ -9040,6 +11519,8 @@ class BfmAutotagSettingTab extends PluginSettingTab {
     }
 
     updateGeneratedMarkdownPreview(refs: GeneratedMarkdownPreviewRefs, animate: boolean): void {
+        const templateAvailable = this.plugin.isTemplateSourceAvailable();
+        refs.checkPanelEl.style.display = templateAvailable ? "" : "none";
         const unfilledProperties = this.plugin.getFrontmatterPreviewTemplateCheck();
         const hasUnfilledProperties = unfilledProperties.length > 0;
         const updateCheckPanel = () => {
@@ -9051,13 +11532,13 @@ class BfmAutotagSettingTab extends PluginSettingTab {
             refs.listEl.empty();
             refs.listEl.style.display = hasUnfilledProperties ? "" : "none";
             refs.cleanTextEl.style.display = hasUnfilledProperties ? "none" : "";
-            refs.cleanTextEl.setText("Empty template fields and overwrite placeholders currently match enabled Autotag outputs.");
+            refs.cleanTextEl.setText("Empty template fields currently match enabled Autotag outputs.");
             unfilledProperties.forEach(property => refs.listEl.createEl("li", { text: property }));
         };
 
-        if (animate) {
+        if (templateAvailable && animate) {
             this.animateElementHeightChange(refs.checkPanelEl, updateCheckPanel, 360);
-        } else {
+        } else if (templateAvailable) {
             updateCheckPanel();
         }
 
@@ -9088,7 +11569,7 @@ class BfmAutotagSettingTab extends PluginSettingTab {
     }
 
     prepareSettingsRevealContainersForMeasurement(containerEl: HTMLElement): void {
-        const revealEls = Array.from(containerEl.querySelectorAll(".bfm-autotag-animated-section-body")) as HTMLElement[];
+        const revealEls = Array.from(containerEl.querySelectorAll(".autotag-animated-section-body")) as HTMLElement[];
         revealEls.forEach(revealEl => {
             revealEl.addClass("is-open");
             revealEl.style.maxHeight = "none";
@@ -9114,7 +11595,7 @@ class BfmAutotagSettingTab extends PluginSettingTab {
 
     animateElementHeightChange(element: HTMLElement, update: () => void, duration: number): void {
         const fromHeight = element.getBoundingClientRect().height;
-        const runningFrame = (element as any).__bfmAutotagHeightFrame as number | undefined;
+        const runningFrame = (element as any).__autotagHeightFrame as number | undefined;
         if (runningFrame !== undefined) window.cancelAnimationFrame(runningFrame);
 
         element.style.height = `${fromHeight}px`;
@@ -9125,28 +11606,82 @@ class BfmAutotagSettingTab extends PluginSettingTab {
         if (Math.abs(toHeight - fromHeight) < 1) {
             element.style.height = "";
             element.style.overflow = "";
-            (element as any).__bfmAutotagHeightFrame = undefined;
+            (element as any).__autotagHeightFrame = undefined;
             return;
         }
 
         const token = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-        (element as any).__bfmAutotagHeightToken = token;
+        (element as any).__autotagHeightToken = token;
         const start = performance.now();
         const tick = (now: number) => {
-            if ((element as any).__bfmAutotagHeightToken !== token) return;
+            if ((element as any).__autotagHeightToken !== token) return;
             const progress = Math.min(1, (now - start) / duration);
             const eased = this.easeSettingsAnimation(progress);
             element.style.height = `${fromHeight + (toHeight - fromHeight) * eased}px`;
             if (progress < 1) {
-                (element as any).__bfmAutotagHeightFrame = window.requestAnimationFrame(tick);
+                (element as any).__autotagHeightFrame = window.requestAnimationFrame(tick);
                 return;
             }
-            (element as any).__bfmAutotagHeightFrame = undefined;
-            (element as any).__bfmAutotagHeightToken = undefined;
+            (element as any).__autotagHeightFrame = undefined;
+            (element as any).__autotagHeightToken = undefined;
             element.style.height = "";
             element.style.overflow = "";
         };
-        (element as any).__bfmAutotagHeightFrame = window.requestAnimationFrame(tick);
+        (element as any).__autotagHeightFrame = window.requestAnimationFrame(tick);
+    }
+
+    animateInlineDependencyWarning(containerEl: HTMLElement, render: () => void): void {
+        const token = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+        (containerEl as any).__autotagInlineWarningToken = token;
+        const runningTimeout = (containerEl as any).__autotagInlineWarningTimeout as number | undefined;
+        if (runningTimeout !== undefined) window.clearTimeout(runningTimeout);
+        const runningCleanupTimeout = (containerEl as any).__autotagInlineWarningCleanupTimeout as number | undefined;
+        if (runningCleanupTimeout !== undefined) window.clearTimeout(runningCleanupTimeout);
+        const runningFrame = (containerEl as any).__autotagInlineWarningFrame as number | undefined;
+        if (runningFrame !== undefined) window.cancelAnimationFrame(runningFrame);
+
+        const fromHeight = containerEl.getBoundingClientRect().height;
+        const oldChildren = Array.from(containerEl.children) as HTMLElement[];
+        containerEl.style.height = `${fromHeight}px`;
+        containerEl.style.overflow = "hidden";
+        containerEl.style.transition = "";
+        oldChildren.forEach(child => {
+            child.getAnimations().forEach(animation => animation.cancel());
+            child.addClass("autotag-inline-dependency-warning-exiting");
+        });
+
+        const renderNextState = () => {
+            if ((containerEl as any).__autotagInlineWarningToken !== token) return;
+            (containerEl as any).__autotagInlineWarningTimeout = undefined;
+            render();
+            const toHeight = this.measureNaturalSettingsHeight(containerEl, containerEl.scrollHeight);
+            if (Math.abs(toHeight - fromHeight) < 1) {
+                containerEl.style.height = "";
+                containerEl.style.overflow = "";
+                containerEl.style.transition = "";
+                return;
+            }
+
+            containerEl.style.transition = "height 240ms cubic-bezier(0.22, 1, 0.36, 1)";
+            const finishToken = token;
+            const cleanup = () => {
+                if ((containerEl as any).__autotagInlineWarningToken !== finishToken) return;
+                containerEl.style.height = "";
+                containerEl.style.overflow = "";
+                containerEl.style.transition = "";
+                (containerEl as any).__autotagInlineWarningCleanupTimeout = undefined;
+            };
+            (containerEl as any).__autotagInlineWarningCleanupTimeout = window.setTimeout(cleanup, 260);
+            window.requestAnimationFrame(() => {
+                if ((containerEl as any).__autotagInlineWarningToken !== token) return;
+                containerEl.style.height = `${toHeight}px`;
+            });
+        };
+
+        (containerEl as any).__autotagInlineWarningTimeout = window.setTimeout(
+            renderNextState,
+            oldChildren.length > 0 ? 150 : 0
+        );
     }
 
     animateSettingsCollapseThenRender(containerEl: HTMLElement, render: () => void): void {
@@ -9155,7 +11690,7 @@ class BfmAutotagSettingTab extends PluginSettingTab {
         const duration = 520;
         const fadeDuration = 180;
         const token = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-        (containerEl as any).__bfmAutotagContentAnimationToken = token;
+        (containerEl as any).__autotagContentAnimationToken = token;
 
         containerEl.style.overflow = "hidden";
         containerEl.style.height = `${previousHeight}px`;
@@ -9170,7 +11705,7 @@ class BfmAutotagSettingTab extends PluginSettingTab {
         });
 
         this.tweenSettingsHeight(containerEl, previousHeight, 0, duration, () => {
-            if ((containerEl as any).__bfmAutotagContentAnimationToken !== token) return;
+            if ((containerEl as any).__autotagContentAnimationToken !== token) return;
             render();
             this.finishSettingsLiveRender(containerEl);
             containerEl.style.height = "";
@@ -9183,7 +11718,7 @@ class BfmAutotagSettingTab extends PluginSettingTab {
         const duration = 420;
         const easing = "cubic-bezier(0.22, 1, 0.36, 1)";
         const token = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-        (containerEl as any).__bfmAutotagContentAnimationToken = token;
+        (containerEl as any).__autotagContentAnimationToken = token;
 
         containerEl.style.overflow = "hidden";
         containerEl.style.height = `${previousHeight}px`;
@@ -9197,12 +11732,12 @@ class BfmAutotagSettingTab extends PluginSettingTab {
 
         const nextHeight = this.measureNaturalSettingsHeight(containerEl, containerEl.scrollHeight);
         this.tweenSettingsHeight(containerEl, previousHeight, nextHeight, duration, () => {
-            if ((containerEl as any).__bfmAutotagContentAnimationToken !== token) return;
+            if ((containerEl as any).__autotagContentAnimationToken !== token) return;
             const settledHeight = this.measureNaturalSettingsHeight(containerEl, nextHeight);
             containerEl.style.height = `${settledHeight}px`;
             containerEl.style.overflow = "";
             window.setTimeout(() => {
-                if ((containerEl as any).__bfmAutotagContentAnimationToken !== token) return;
+                if ((containerEl as any).__autotagContentAnimationToken !== token) return;
                 const lockedHeight = containerEl.getBoundingClientRect().height;
                 const naturalHeight = this.measureNaturalSettingsHeight(containerEl, lockedHeight);
                 if (Math.abs(naturalHeight - lockedHeight) < 2) {
@@ -9211,7 +11746,7 @@ class BfmAutotagSettingTab extends PluginSettingTab {
                 }
                 containerEl.style.overflow = "hidden";
                 this.tweenSettingsHeight(containerEl, lockedHeight, naturalHeight, 160, () => {
-                    if ((containerEl as any).__bfmAutotagContentAnimationToken !== token) return;
+                    if ((containerEl as any).__autotagContentAnimationToken !== token) return;
                     containerEl.style.height = "";
                     containerEl.style.overflow = "";
                 });
@@ -9237,6 +11772,14 @@ class BfmAutotagSettingTab extends PluginSettingTab {
 
     renderGeolocationSettings(containerEl: HTMLElement): void {
         this.createSettingsAnchor(containerEl, "geolocation", "Geolocation Tags");
+        this.renderProblemWarningPanel(
+            containerEl,
+            "autotag-geolocation-warning",
+            "Reverse geocode attention",
+            this.getReverseGeocodeProblemWarningLines(),
+            "warning",
+            "This affects place-name fields such as country, region, city, and address. GPS coordinates can still be written when image metadata contains them."
+        );
 
         const geolocationHowHostEl = containerEl.createDiv();
         const renderGeolocationHow = () => {
@@ -9276,7 +11819,7 @@ class BfmAutotagSettingTab extends PluginSettingTab {
         containerEl.empty();
         if (!this.plugin.settings.geolocationEnabled) return;
 
-        const geolocationSetupEl = this.createSettingsRevealContainer(containerEl, "bfm-autotag-subcategory");
+        const geolocationSetupEl = this.createSettingsRevealContainer(containerEl, "autotag-subcategory");
         geolocationSetupEl.createEl("h4", { text: "Geolocation Setup" });
         new Setting(geolocationSetupEl)
             .setName("Reverse geocode provider")
@@ -9296,7 +11839,7 @@ class BfmAutotagSettingTab extends PluginSettingTab {
         const renderLocalNominatimSettings = () => {
             localNominatimHostEl.empty();
             if (this.plugin.settings.geolocationProvider !== "local-nominatim") return;
-            const localNominatimEl = localNominatimHostEl.createDiv({ cls: "bfm-autotag-property-panel" });
+            const localNominatimEl = localNominatimHostEl.createDiv({ cls: "autotag-property-panel" });
             localNominatimEl.createEl("h5", { text: "Local Nominatim" });
             new Setting(localNominatimEl)
                 .setName("Local Nominatim URL")
@@ -9327,24 +11870,25 @@ class BfmAutotagSettingTab extends PluginSettingTab {
         const propertiesHostEl = containerEl.createDiv();
         const renderGeolocationProperties = () => {
             propertiesHostEl.empty();
-            const propertiesEl = this.createSettingsRevealContainer(propertiesHostEl, "bfm-autotag-subcategory");
+            const propertiesEl = this.createSettingsRevealContainer(propertiesHostEl, "autotag-subcategory");
             propertiesEl.createEl("h4", { text: "Geolocation Tags Properties" });
             propertiesEl.createEl("p", {
-                text: "Choose which location fields to write and rename their frontmatter properties. These properties are managed here and hidden from the general property-list dropdown when Clear Dropdown is on.",
+                text: "Choose which location fields to write and rename their frontmatter properties. These properties remain available as suggestions in other property fields.",
                 cls: "setting-item-description",
             });
-            const propertyListEl = propertiesEl.createDiv({ cls: "bfm-autotag-geolocation-property-list" });
+            const propertyListEl = propertiesEl.createDiv({ cls: "autotag-geolocation-property-list" });
             const updateGeolocationPropertyTitles = () => {
-                const titles = Array.from(propertyListEl.querySelectorAll("[data-bfm-geolocation-property-title]")) as HTMLElement[];
+                const titles = Array.from(propertyListEl.querySelectorAll("[data-autotag-geolocation-property-title]")) as HTMLElement[];
                 titles.forEach((titleEl, index) => titleEl.setText(`Geolocation Property ${index + 1}`));
             };
             const renderGeolocationPropertyPanel = (mapping: GeolocationPropertyMapping, index: number) => {
-                const propertyPanelEl = propertyListEl.createDiv({ cls: "bfm-autotag-property-panel" });
+                const propertyPanelEl = propertyListEl.createDiv({ cls: "autotag-property-panel" });
+                propertyPanelEl.id = `autotag-geolocation-property-${mapping.id}`;
                 propertyPanelEl.dataset.geolocationPropertyId = mapping.id;
                 this.applyRecentlyAddedPanelHighlight(propertyPanelEl, "geolocation-property", mapping.id);
                 propertyPanelEl.createEl("h5", {
                     text: `Geolocation Property ${index + 1}`,
-                    attr: { "data-bfm-geolocation-property-title": "true" },
+                    attr: { "data-autotag-geolocation-property-title": "true" },
                 });
                 const setting = new Setting(propertyPanelEl)
                     .setName("Location field")
@@ -9433,13 +11977,13 @@ class BfmAutotagSettingTab extends PluginSettingTab {
         };
         renderGeolocationProperties();
 
-        const fixEl = this.createSettingsRevealContainer(containerEl, "bfm-autotag-subcategory");
+        const fixEl = this.createSettingsRevealContainer(containerEl, "autotag-subcategory");
         const getQueuedGeolocationDesc = () => {
             const queuedCount = this.plugin.settings.pendingGeocodeJobs.length;
             return `${queuedCount} geolocation lookup${queuedCount === 1 ? "" : "s"} currently queued.`;
         };
         fixEl.createEl("h4", { text: "Fix" });
-        const fixPanelEl = fixEl.createDiv({ cls: "bfm-autotag-property-panel bfm-autotag-geolocation-fix-panel" });
+        const fixPanelEl = fixEl.createDiv({ cls: "autotag-property-panel autotag-geolocation-fix-panel" });
         const retryQueuedGeolocationSetting = new Setting(fixPanelEl)
             .setName("Retry queued Geolocation Tags")
             .setDesc(getQueuedGeolocationDesc())
@@ -9481,7 +12025,7 @@ class BfmAutotagSettingTab extends PluginSettingTab {
                             }
                         ).open();
                     });
-                button.buttonEl.addClass("bfm-autotag-danger-button");
+                button.buttonEl.addClass("autotag-danger-button");
             });
         this.wrapSubcategoryPanels(containerEl);
         this.decorateSettingsHeadings(containerEl);
@@ -9527,13 +12071,37 @@ class BfmAutotagSettingTab extends PluginSettingTab {
         }, 80);
     }
 
+    refreshFolderPropertyValuesIfVisible(): void {
+        if (this.activeSettingsSection !== "folder-tags") return;
+        this.refreshDisplayAnimated();
+    }
+
+    openSettingsProblemTarget(sectionId: string, solutionAnchorId?: string, fallbackAnchorId?: string): void {
+        this.activeSettingsSection = sectionId;
+        this.display();
+        window.setTimeout(() => {
+            const solutionEl = solutionAnchorId
+                ? this.containerEl.querySelector(`#${solutionAnchorId}`) as HTMLElement | null
+                : null;
+            const fallbackEl = fallbackAnchorId
+                ? this.containerEl.querySelector(`#${fallbackAnchorId}`) as HTMLElement | null
+                : null;
+            const targetEl = solutionEl ?? fallbackEl;
+            if (targetEl) {
+                targetEl.scrollIntoView({ block: "center", behavior: "smooth" });
+            } else {
+                this.scrollSettingsToTop();
+            }
+        }, 0);
+    }
+
     getSettingsSections(): { id: string; label: string; icon: string; keywords: string[] }[] {
         return [
-            { id: "health", label: "Health", icon: "activity", keywords: ["health", "check", "test", "status", "ollama", "ai image analyzer", "nominatim", "bfm", "queue", "duplicate", "failed", "processed"] },
-            { id: "setup", label: "Setup", icon: "wrench", keywords: ["overview", "how it works", "start", "setup", "base path", "bfm", "file name", "location", "format"] },
+            { id: "health", label: "Health", icon: "activity", keywords: ["health", "check", "test", "status", "ollama", "vision", "nominatim", "queue", "duplicate", "failed", "processed"] },
+            { id: "setup", label: "Setup", icon: "wrench", keywords: ["overview", "how it works", "start", "setup", "base path", "file name", "location", "format"] },
             { id: "search", label: "Search", icon: "search", keywords: ["find", "settings", "options"] },
             { id: "folder-tags", label: "Folder Tags", icon: "folder", keywords: ["folder", "property lists", "fallback", "candidates"] },
-            { id: "ai-tags", label: "AI Tags", icon: "sparkles", keywords: ["ollama", "model", "qwen", "filename", "candidate", "generated tags"] },
+            { id: "ai-tags", label: "AI Tags", icon: "sparkles", keywords: ["ollama", "model", "vision", "llava", "gemma", "qwen", "filename", "candidate", "generated tags"] },
             { id: "geolocation", label: "Geolocation Tags", icon: "map-pin", keywords: ["gps", "reverse geocode", "nominatim", "location"] },
             { id: "properties", label: "Properties", icon: "database", keywords: ["frontmatter", "template", "linktofile", "aitags", "aidescription", "embed"] },
             { id: "vault-awareness", label: "Vault Awareness", icon: "vault", keywords: ["vault", "vocabulary", "linguistic", "known concepts"] },
@@ -9542,6 +12110,7 @@ class BfmAutotagSettingTab extends PluginSettingTab {
             { id: "duplicates", label: "Duplicates", icon: "copy-check", keywords: ["duplicate", "hash", "pair", "manual pairing", "replace"] },
             { id: "fix-recover", label: "Fix / Recover", icon: "wrench", keywords: ["failed", "retry", "recover", "help", "processed", "forget", "reprocess"] },
             { id: "qol", label: "QoL", icon: "sliders-horizontal", keywords: ["shutdown", "delete pair", "quality of life"] },
+            { id: "thanks", label: "Thanks", icon: "heart", keywords: ["thanks", "credit", "inspired", "dependencies", "templater"] },
         ];
     }
 
@@ -9552,7 +12121,7 @@ class BfmAutotagSettingTab extends PluginSettingTab {
     getSettingsHeadingIcon(title: string): string | null {
         const icons: Record<string, string> = {
             "Path Setup": "folder-cog",
-            "Setup - BFM Paths": "folder-cog",
+            "Setup - Companion Paths": "folder-cog",
             "Plugin Properties": "database",
             "Folder Properties": "folder-tag",
             "Fallback": "corner-down-right",
@@ -9564,9 +12133,10 @@ class BfmAutotagSettingTab extends PluginSettingTab {
             "Fix": "wrench",
             "AI Setup": "cpu",
             "AI Tags": "sparkles",
-            "AI Tags - AI Image Analyzer": "image",
-            "AI Tags - Ollama": "cpu",
-            "AI Properties": "sparkles",
+            "AI - Image Analysis": "image",
+            "AI Tags - Tag Model": "cpu",
+            "AI Input": "list-filter",
+            "Image Description": "file-text",
             "Candidate Modes": "list-filter",
             "Health": "activity",
             "Setup Profiles": "package-open",
@@ -9579,33 +12149,36 @@ class BfmAutotagSettingTab extends PluginSettingTab {
             "Duplicates": "copy-check",
             "Duplicate Fix": "wrench",
             "Duplicate Search": "search-check",
+            "Search": "search-check",
             "Manual Pairing": "link",
+            "Hashes": "fingerprint",
             "Vault Setup": "vault",
             "Bridge Setup": "waypoints",
+            "Bridge Enrichment Rules": "waypoints",
             "Processing Setup": "list-checks",
             "Companion Notes": "file-stack",
-            "Clear Dropdown": "list-x",
             "Single File": "refresh-cw",
             "Existing Vaults": "folder-sync",
             "Failed Files": "triangle-alert",
             "Processed Files": "circle-check",
             "Limited File Type Warnings": "file-warning",
+            "Thanks": "heart",
         };
         return icons[title] ?? null;
     }
 
     decorateHeadingWithIcon(headingEl: HTMLElement, icon: string | null): void {
-        if (!icon || headingEl.querySelector(".bfm-autotag-heading-icon")) return;
+        if (!icon || headingEl.querySelector(".autotag-heading-icon")) return;
         const label = headingEl.textContent?.trim() ?? "";
         headingEl.empty();
-        const iconEl = headingEl.createSpan({ cls: "bfm-autotag-heading-icon" });
+        const iconEl = headingEl.createSpan({ cls: "autotag-heading-icon" });
         setIcon(iconEl, icon);
-        headingEl.createSpan({ text: label, cls: "bfm-autotag-heading-label" });
+        headingEl.createSpan({ text: label, cls: "autotag-heading-label" });
     }
 
     decorateSettingsHeadings(containerEl: HTMLElement): void {
-        (Array.from(containerEl.querySelectorAll("h3[id^='bfm-autotag-']")) as HTMLElement[]).forEach(heading => {
-            const id = heading.id.replace("bfm-autotag-", "");
+        (Array.from(containerEl.querySelectorAll("h3[id^='autotag-']")) as HTMLElement[]).forEach(heading => {
+            const id = heading.id.replace("autotag-", "");
             this.decorateHeadingWithIcon(heading, this.getSettingsSectionIcon(id));
         });
         (Array.from(containerEl.querySelectorAll("h4, h5")) as HTMLElement[]).forEach(heading => {
@@ -9619,13 +12192,13 @@ class BfmAutotagSettingTab extends PluginSettingTab {
             this.activeSettingsSection = "health";
         }
 
-        const navEl = containerEl.createDiv({ cls: "bfm-autotag-settings-tabs" });
+        const navEl = containerEl.createDiv({ cls: "autotag-settings-tabs" });
         sections.forEach(section => {
             const button = navEl.createEl("button");
             button.type = "button";
-            const iconEl = button.createSpan({ cls: "bfm-autotag-tab-icon" });
+            const iconEl = button.createSpan({ cls: "autotag-tab-icon" });
             setIcon(iconEl, section.icon);
-            button.createSpan({ text: section.label, cls: "bfm-autotag-tab-label" });
+            button.createSpan({ text: section.label, cls: "autotag-tab-label" });
             if (section.id === this.activeSettingsSection) button.addClass("is-active");
             button.onclick = () => {
                 this.closeInfoDescriptions();
@@ -9635,9 +12208,47 @@ class BfmAutotagSettingTab extends PluginSettingTab {
         });
     }
     renderHowItWorksPanel(containerEl: HTMLElement, title: string, body: string, warning = false): void {
-        const panel = containerEl.createDiv({ cls: warning ? "bfm-autotag-how-panel bfm-autotag-how-panel-warning" : "bfm-autotag-how-panel" });
+        const panel = containerEl.createDiv({ cls: warning ? "autotag-how-panel autotag-how-panel-warning" : "autotag-how-panel" });
         panel.createEl("strong", { text: title });
         panel.createEl("p", { text: body, cls: "setting-item-description" });
+    }
+
+    renderThanksSettings(containerEl: HTMLElement): void {
+        const projects = [
+            {
+                name: "Binary File Manager",
+                url: "https://github.com/qawatake/obsidian-binary-file-manager-plugin",
+                description: "Autotag was lovingly inspired by companion-note workflows around Binary File Manager. It now handles its own companion-note flow, but the original idea deserves a clear nod.",
+            },
+            {
+                name: "Templater",
+                url: "https://github.com/SilentVoid13/Templater",
+                description: "Templater helped shape how flexible note templates can feel in Obsidian. Autotag keeps its own internal and file-template handling so users do not need another required plugin.",
+            },
+            {
+                name: "AI Image Analyzer",
+                url: "https://github.com/Swaggeroo/obsidian-ai-image-analyzer",
+                description: "AI Image Analyzer explored a thoughtful image-to-metadata workflow for Obsidian. Autotag now runs its own local Ollama vision path, with real thanks for the inspiration.",
+            },
+        ];
+
+        containerEl.createEl("p", {
+            text: "Autotag is independent and does not require these plugins. This tab is here as a small thank-you to community projects whose ideas, care, or workflow patterns helped inspire it.",
+            cls: "setting-item-description",
+        });
+
+        projects.forEach(project => {
+            const panelEl = containerEl.createDiv({ cls: "autotag-property-panel" });
+            panelEl.createEl("h5", { text: project.name });
+            new Setting(panelEl)
+                .setName("Project")
+                .setDesc(project.description)
+                .addButton(button => button
+                    .setButtonText("Open Project")
+                    .onClick(() => {
+                        window.open(project.url);
+                    }));
+        });
     }
 
     readSettingsProfileBrowserFile(file: File): Promise<string> {
@@ -9665,13 +12276,13 @@ class BfmAutotagSettingTab extends PluginSettingTab {
         const render = () => {
             containerEl.empty();
             if (!this.plugin.isDevSettingsProfile(profile)) return;
-            const panel = containerEl.createDiv({ cls: "bfm-autotag-settings-profile-video" });
-            const header = panel.createDiv({ cls: "bfm-autotag-settings-profile-video-header" });
-            const iconEl = header.createSpan({ cls: "bfm-autotag-heading-icon" });
+            const panel = containerEl.createDiv({ cls: "autotag-settings-profile-video" });
+            const header = panel.createDiv({ cls: "autotag-settings-profile-video-header" });
+            const iconEl = header.createSpan({ cls: "autotag-heading-icon" });
             setIcon(iconEl, "play-circle");
             header.createSpan({ text: "Dev setup video" });
             panel.createDiv({
-                cls: "bfm-autotag-settings-profile-video-placeholder",
+                cls: "autotag-settings-profile-video-placeholder",
                 text: "YouTube embed placeholder",
             });
         };
@@ -9688,7 +12299,7 @@ class BfmAutotagSettingTab extends PluginSettingTab {
 
     renderSettingsProfileSettings(containerEl: HTMLElement): void {
         containerEl.createEl("h4", { text: "Setup Profiles" });
-        const panelEl = containerEl.createDiv({ cls: "bfm-autotag-property-panel bfm-autotag-settings-profile-panel" });
+        const panelEl = containerEl.createDiv({ cls: "autotag-property-panel autotag-settings-profile-panel" });
         const folderPath = this.plugin.getSettingsProfileFolderPath();
         panelEl.createEl("p", {
             cls: "setting-item-description",
@@ -9733,8 +12344,8 @@ class BfmAutotagSettingTab extends PluginSettingTab {
             if (videoHostEl) this.renderSettingsProfileVideoPlaceholder(videoHostEl, activeProfile, animateVideo);
         };
 
-        const dropEl = panelEl.createDiv({ cls: "bfm-autotag-settings-profile-dropzone" });
-        dropEl.createDiv({ text: "Drop setup JSON files here", cls: "bfm-autotag-settings-profile-dropzone-title" });
+        const dropEl = panelEl.createDiv({ cls: "autotag-settings-profile-dropzone" });
+        dropEl.createDiv({ text: "Drop setup JSON files here", cls: "autotag-settings-profile-dropzone-title" });
         dropEl.createDiv({ text: "Imported setups stay untouched; edits are saved into a [Custom] copy.", cls: "setting-item-description" });
         dropEl.addEventListener("dragover", event => {
             event.preventDefault();
@@ -9822,26 +12433,233 @@ class BfmAutotagSettingTab extends PluginSettingTab {
                             }
                         ).open();
                     });
-                button.buttonEl.addClass("bfm-autotag-danger-button");
+                button.buttonEl.addClass("autotag-danger-button");
             });
 
-        videoHostEl = panelEl.createDiv({ cls: "bfm-autotag-settings-profile-video-host" });
+        videoHostEl = panelEl.createDiv({ cls: "autotag-settings-profile-video-host" });
         void refreshProfileDropdown();
     }
 
     renderSoftWarningPanel(containerEl: HTMLElement, title: string, body: string): void {
-        const panel = containerEl.createDiv({ cls: "bfm-autotag-soft-warning-panel" });
+        const panel = containerEl.createDiv({ cls: "autotag-soft-warning-panel" });
         panel.createEl("strong", { text: title });
         panel.createEl("p", { text: body, cls: "setting-item-description" });
     }
 
     renderAttentionWarningPanel(containerEl: HTMLElement, id: string, title: string, lines: string[]): void {
         if (lines.length === 0) return;
-        const panel = containerEl.createDiv({ cls: "bfm-autotag-attention-warning-panel" });
+        const panel = containerEl.createDiv({ cls: "autotag-attention-warning-panel" });
         panel.id = id;
         panel.createEl("strong", { text: title });
         const listEl = panel.createEl("ul");
         lines.forEach(line => listEl.createEl("li", { text: line }));
+    }
+
+    renderProblemWarningPanel(containerEl: HTMLElement, id: string, title: string, lines: string[], tone: "warning" | "danger" = "warning", description = ""): void {
+        if (lines.length === 0) return;
+
+        const panel = containerEl.createDiv({
+            cls: `autotag-attention-warning-panel autotag-problem-warning-panel is-${tone}`,
+        });
+        panel.id = id;
+        panel.createEl("strong", { text: title });
+        if (description) {
+            panel.createEl("p", { text: description, cls: "setting-item-description autotag-problem-warning-description" });
+        }
+        const listEl = panel.createEl("ul");
+        lines.forEach(line => listEl.createEl("li", { text: line }));
+    }
+
+    renderInlineDependencyWarning(containerEl: HTMLElement, title: string, lines: string[], icon = "alert-triangle"): void {
+        containerEl.addClass("autotag-inline-dependency-warning-host");
+        if (lines.length === 0) return;
+
+        const panel = containerEl.createDiv({
+            cls: "autotag-attention-warning-panel autotag-problem-warning-panel autotag-inline-dependency-warning is-warning",
+        });
+        panel.addClass("autotag-inline-dependency-warning-entering");
+        const titleEl = panel.createEl("strong");
+        const iconEl = titleEl.createSpan({ cls: "autotag-inline-dependency-warning-icon" });
+        setIcon(iconEl, icon);
+        titleEl.createSpan({ text: title });
+        const listEl = panel.createEl("ul");
+        lines.forEach(line => listEl.createEl("li", { text: line }));
+        window.requestAnimationFrame(() => {
+            window.requestAnimationFrame(() => {
+                if (!panel.isConnected) return;
+                panel.removeClass("autotag-inline-dependency-warning-entering");
+            });
+        });
+    }
+
+    getVaultVocabularyAdvancedWarningLines(enabled: boolean, vaultAwarenessEnabled: boolean, source: "ai-tags" | "property" | "fallback"): string[] {
+        if (!enabled) return [];
+        const lines = source === "ai-tags"
+            ? [
+                "Only enable this if you know what you are doing. AI-generated tags can feed back into Vault Awareness and then influence future AI tags, canonicalization, and routed output.",
+                "This may drastically alter tagging behavior, reinforce incorrect or overly broad tags, and lead to an escalating feedback loop.",
+            ]
+            : [
+                "Only enable this if you know what you are doing. Values from this property become Vault Awareness vocabulary and can strongly influence future AI tagging, canonicalization, and routed output.",
+                "If noisy or broad values are scanned back into the vocabulary, this may lead to an escalating feedback loop.",
+            ];
+        if (!vaultAwarenessEnabled) {
+            lines.push(source === "fallback"
+                ? "Vault Awareness is currently disabled; this fallback vocabulary source will apply once Vault Awareness is enabled."
+                : "Vault Awareness is currently disabled; this vocabulary source will apply once Vault Awareness is enabled.");
+        }
+        return lines;
+    }
+
+    isHealthConcern(result: HealthCheckResult | undefined): boolean {
+        return result?.tone === "danger" || result?.tone === "warning";
+    }
+
+    getCachedHealthConcernLines(id: string, fallbackLabel: string): string[] {
+        const result = this.healthCheckResults.get(id);
+        if (!this.isHealthConcern(result)) return [];
+
+        const lines = (result?.checks ?? [])
+            .filter(check => check.tone === "danger" || check.tone === "warning")
+            .map(check => check.text);
+        if (result?.message) lines.unshift(result.message);
+        if (lines.length > 0) return Array.from(new Set(lines));
+        return [`${fallbackLabel}: ${result?.value ?? "Needs attention"}`];
+    }
+
+    getSetupProblemWarningLines(): string[] {
+        const normalizeFolder = (path: string, fallback: string) => (path.trim() || fallback).replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+        const basePath = normalizeFolder(this.plugin.settings.basePath, DEFAULT_SETTINGS.basePath);
+        const notePath = this.plugin.getEffectiveCompanionNoteFolder();
+        const baseFolder = this.app.vault.getAbstractFileByPath(basePath);
+        const noteFolder = this.app.vault.getAbstractFileByPath(notePath);
+        const lines: string[] = [];
+
+        if (!(baseFolder instanceof TFolder)) lines.push(`Base Path for Watched Files is missing: ${basePath}. Set it to the folder where new source files arrive.`);
+        if (!(noteFolder instanceof TFolder)) lines.push(`Companion Note Folder is missing: ${notePath}. Set it to the folder where companion notes are created.`);
+        return lines;
+    }
+
+    getImageAnalysisProblemWarningLines(): string[] {
+        if (!this.plugin.settings.imageAnalysisEnabled) return [];
+        const result = this.healthCheckResults.get("image-analysis");
+        if (!this.isHealthConcern(result)) return [];
+
+        const selectedModel = this.plugin.getOllamaVisionModel();
+        if (result?.value === "Failed") {
+            return [`Ollama is not reachable at ${this.plugin.settings.ollamaBaseUrl || DEFAULT_SETTINGS.ollamaBaseUrl}. Start Ollama or update the Ollama Local URL.`];
+        }
+        if (result?.value === "No models") {
+            return ["Ollama is reachable, but no pulled models were listed. Pull the selected vision model or choose a model that is already installed."];
+        }
+        if (result?.value === "Model missing") {
+            return [`The selected vision model '${selectedModel}' is not pulled. Use Pull Vision Model or choose an installed model from the dropdown.`];
+        }
+        return this.getCachedHealthConcernLines("image-analysis", "Image Analysis");
+    }
+
+    getOllamaProblemWarningLines(): string[] {
+        const result = this.healthCheckResults.get("ai-ollama");
+        if (!this.isHealthConcern(result)) return [];
+
+        const selectedModel = this.plugin.settings.ollamaModel.trim() || DEFAULT_SETTINGS.ollamaModel;
+        if (result?.value === "Failed") {
+            return [`Ollama is not reachable at ${this.plugin.settings.ollamaBaseUrl || DEFAULT_SETTINGS.ollamaBaseUrl}. Start Ollama or update the Ollama Local URL.`];
+        }
+        if (result?.value === "No models") {
+            return ["Ollama is reachable, but no pulled models were listed. Pull the selected model or choose a model that is already installed."];
+        }
+        if (result?.value === "Model missing") {
+            return [`The selected tag model '${selectedModel}' is not pulled. Use Pull Tag Model or choose an installed model from the dropdown.`];
+        }
+        return this.getCachedHealthConcernLines("ai-ollama", "Ollama");
+    }
+
+    getReverseGeocodeProblemWarningLines(): string[] {
+        const result = this.healthCheckResults.get("geolocation-geocode");
+        if (!this.isHealthConcern(result)) return [];
+
+        if (this.plugin.settings.geolocationProvider === "local-nominatim") {
+            return ["Local Nominatim did not return location data. Check the Local Nominatim URL or switch to Public Nominatim while testing."];
+        }
+        return ["Reverse geocoding did not return location data. Coordinates can still be written, but place names need a working provider."];
+    }
+
+    getVaultAwarenessProblemWarningLines(): string[] {
+        if (!this.plugin.settings.vaultAwarenessEnabled || this.plugin.settings.aiTaggingEnabled) return [];
+        return [
+            "Vault Awareness currently runs through the AI tagging pipeline. Enable AI Tagging via Ollama so Vault Awareness can rank, verify, and write recognized vault terms.",
+            "Open Health after changing the setting to confirm the local tag model is reachable and ready.",
+        ];
+    }
+
+    getFolderTagsDependencyWarningLines(): string[] {
+        if (!this.plugin.settings.useFolderTags) return [];
+        const lines: string[] = [];
+        if (this.plugin.hasConfiguredFolderAiCandidateSource() && !this.plugin.settings.aiTaggingEnabled) {
+            lines.push("One or more Folder Tags AI candidate modes are enabled, but AI Tagging is off. Enable AI Tagging for those folder values to influence AI Tags.");
+        }
+        const hasVaultCandidateSource = this.plugin.getFolderPropertyMappings().some(mapping => mapping.useAsVaultCandidate)
+            || this.plugin.settings.folderFallbackUseAsVaultCandidate;
+        if (hasVaultCandidateSource && !this.plugin.settings.vaultAwarenessEnabled) {
+            lines.push("One or more Folder Tags properties are marked as Vault Awareness vocabulary, but Vault Awareness is off. Enable Vault Awareness for those properties to build vault vocabulary.");
+        }
+        return lines;
+    }
+
+    getAiInputDependencyWarningLines(): string[] {
+        const lines: string[] = [];
+        if ((this.plugin.settings.useGeolocationForAiTags || this.plugin.settings.useGeolocationForAiDescription) && !this.plugin.settings.geolocationEnabled) {
+            lines.push("Use geolocation as AI context is enabled, but Geolocation Tags are off. Enable Geolocation Tags so AI can receive GPS and reverse-geocode context.");
+        }
+        return lines;
+    }
+
+    getAiPropertiesDependencyWarningLines(): string[] {
+        const lines: string[] = [];
+        if (this.plugin.settings.removeFolderTagsFromAiTags && !this.plugin.settings.useFolderTags) {
+            lines.push("Keep Folder Tags values out of AI Tags is enabled, but Folder Tags are off. The cleanup will apply once Folder Tags are enabled.");
+        }
+        if (this.plugin.settings.removeGeolocationFromAiTags && !this.plugin.settings.geolocationEnabled) {
+            lines.push("Keep geolocation values out of AI Tags is enabled, but Geolocation Tags are off. The cleanup will apply once Geolocation Tags are enabled.");
+        }
+        if (this.plugin.settings.aiTagsUseAsVaultCandidate && !this.plugin.settings.vaultAwarenessEnabled) {
+            lines.push("AI Tags are marked as Vault Awareness vocabulary, but Vault Awareness is off. Enable Vault Awareness to scan this property.");
+        }
+        return lines;
+    }
+
+    getBridgeDependencyWarningLines(): string[] {
+        if (!this.plugin.settings.bridgeEnabled && !this.plugin.settings.manualEnrichmentEnabled) return [];
+        const lines: string[] = [];
+        if (this.plugin.settings.bridgeEnabled
+            && !this.plugin.settings.bridgeUseAiInput
+            && !this.plugin.settings.bridgeUseFilenameInput
+            && !this.plugin.settings.bridgeUseFolderInput
+            && !this.plugin.settings.bridgeUseGeolocationInput) {
+            lines.push("Evidence-aware Bridge rules are enabled, but every Bridge input is off. Enable at least one Bridge input or turn evidence-aware rules off.");
+        }
+        if (this.plugin.settings.manualEnrichmentEnabled && !this.plugin.hasUsableBridgeInput()) {
+            lines.push("Direct expansion rules are enabled, but no Bridge input can currently provide source terms. Enable AI Tagging for AI input, or enable a usable filename, Folder Tags, or Geolocation input.");
+        }
+        if (this.plugin.settings.bridgeUseAiInput && !this.plugin.settings.aiTaggingEnabled) {
+            lines.push("Bridge AI input is enabled, but AI Tagging is off. Bridge can still use filename, Folder Tags, or Geolocation inputs when those are enabled.");
+        }
+        if (this.plugin.settings.bridgeUseFilenameInput && this.plugin.settings.filenameCandidateMode === "disabled") {
+            lines.push("Bridge filename input is enabled, but Filename Candidate Mode is disabled in AI Input.");
+        }
+        if (this.plugin.settings.bridgeUseFolderInput && !this.plugin.hasActiveFolderAiCandidateSource()) {
+            lines.push(this.plugin.settings.useFolderTags
+                ? "Bridge folder input is enabled, but no Folder Tags candidate source is set to Consider or All Keywords."
+                : "Bridge folder input is enabled, but Folder Tags are off.");
+        }
+        if (this.plugin.settings.bridgeUseGeolocationInput && !this.plugin.settings.geolocationEnabled) {
+            lines.push("Bridge geolocation input is enabled, but Geolocation Tags are off. Enable Geolocation Tags for Bridge to use known location metadata.");
+        }
+        if (this.plugin.settings.bridgeUsePreBridgeVaultAwarenessOutput && !this.plugin.settings.vaultAwarenessEnabled) {
+            lines.push("Pre-Bridge terms for Vault Awareness output are enabled, but Vault Awareness is off. This will apply once Vault Awareness is enabled.");
+        }
+        return lines;
     }
 
     renderMoveAffectedFilesSetting(containerEl: HTMLElement, description: string, folderName: string, label: string, getFiles: () => TFile[]): void {
@@ -9866,13 +12684,12 @@ class BfmAutotagSettingTab extends PluginSettingTab {
     }
 
     getSetupHealthChecks(baseFolder: unknown, noteFolder: unknown, exampleNoteName: string): HealthDashboardCheck[] {
-        const bfmPlugin = (this.app as any).plugins?.plugins?.["obsidian-binary-file-manager-plugin"];
         const baseExists = baseFolder instanceof TFolder;
         const noteExists = noteFolder instanceof TFolder;
         return [
-            { tone: bfmPlugin ? "success" : "danger", text: "Binary File Manager loaded" },
-            { tone: baseExists && noteExists ? "success" : "danger", text: "Both folders exist" },
-                    { tone: exampleNoteName ? "success" : "danger", text: `Example test: ${exampleNoteName || "No filename"}` },
+            { tone: baseExists ? "success" : "danger", text: "Source folder exists" },
+            { tone: noteExists ? "success" : "danger", text: "Companion note folder exists" },
+            { tone: exampleNoteName ? "success" : "danger", text: `Example note name: ${exampleNoteName || "No filename"}` },
         ];
     }
 
@@ -9888,13 +12705,13 @@ class BfmAutotagSettingTab extends PluginSettingTab {
         containerEl.empty();
         containerEl.toggleClass("is-empty", !checks || checks.length === 0);
         (checks ?? []).forEach(check => {
-            const rowEl = containerEl.createDiv({ cls: `bfm-autotag-health-check-row is-${check.tone}` });
-            const iconEl = rowEl.createSpan({ cls: "bfm-autotag-health-check-icon" });
+            const rowEl = containerEl.createDiv({ cls: `autotag-health-check-row is-${check.tone}` });
+            const iconEl = rowEl.createSpan({ cls: "autotag-health-check-icon" });
             setIcon(iconEl, this.getHealthCheckIconName(check.tone));
-            const textEl = rowEl.createSpan({ cls: "bfm-autotag-health-check-text" });
+            const textEl = rowEl.createSpan({ cls: "autotag-health-check-text" });
             textEl.createSpan({ text: check.text });
             if (check.tone === "spinner") {
-                const dotsEl = textEl.createSpan({ cls: "bfm-autotag-loading-dots" });
+                const dotsEl = textEl.createSpan({ cls: "autotag-loading-dots" });
                 [0, 1, 2].forEach(() => dotsEl.createSpan({ text: "." }));
             }
         });
@@ -9905,50 +12722,78 @@ class BfmAutotagSettingTab extends PluginSettingTab {
         containerEl.createSpan({ text: card.value });
     }
 
+    getHealthDashboardCardSignature(card: HealthDashboardCard): string {
+        return [
+            card.tone ?? "neutral",
+            card.value,
+            card.description,
+            ...(card.checks ?? []).map(check => `${check.tone}:${check.text}`),
+        ].join("\u001f");
+    }
+
     getHealthDashboardCards(): HealthDashboardCard[] {
         const basePath = (this.plugin.settings.basePath || DEFAULT_SETTINGS.basePath).replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
-        const notePath = (this.plugin.settings.bfmNewFileLocation || DEFAULT_SETTINGS.bfmNewFileLocation).replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
+        const notePath = this.plugin.getEffectiveCompanionNoteFolder();
         const baseFolder = this.app.vault.getAbstractFileByPath(basePath);
         const noteFolder = this.app.vault.getAbstractFileByPath(notePath);
-        const exampleNoteName = this.plugin.renderBfmFileNameFormatFromParts("Example.jpg", `${basePath}/Example.jpg`, "jpg");
-        const setupChecks = this.healthCheckResults.get("setup-bfm")?.checks ?? this.getSetupHealthChecks(baseFolder, noteFolder, exampleNoteName);
+        const exampleNoteName = this.plugin.renderCompanionNoteNameFormatFromParts("Example.jpg", `${basePath}/Example.jpg`, "jpg");
+        const setupChecks = this.healthCheckResults.get("setup-paths")?.checks ?? this.getSetupHealthChecks(baseFolder, noteFolder, exampleNoteName);
         const folderMappingCount = this.plugin.settings.folderPropertyMappings.length;
-        const templateUnknown = this.plugin.getFrontmatterPreviewTemplateCheck();
-        const templateMissing = this.plugin.getMissingTemplateDeclarationProperties();
+        const templateAvailable = this.plugin.isTemplateSourceAvailable();
+        const templateUnknown = templateAvailable ? this.plugin.getFrontmatterPreviewTemplateCheck() : [];
+        const templateMissing = templateAvailable ? this.plugin.getMissingTemplateDeclarationProperties() : [];
         const vocabularyCount = this.plugin.vaultVocabulary.size;
         const vaultCandidateProperties = this.plugin.getVaultAwarenessCandidateProperties();
         const bridgeRuleCount = this.plugin.parseManualSubjectBridgeRules().length;
         const enrichmentRuleCount = this.plugin.parseManualEnrichmentRules().size;
+        const bridgeEvidenceActive = this.plugin.settings.bridgeEnabled;
+        const bridgeDirectActive = this.plugin.settings.manualEnrichmentEnabled;
+        const bridgeAnyActive = bridgeEvidenceActive || bridgeDirectActive;
+        const bridgeHasActiveRules = (bridgeEvidenceActive && bridgeRuleCount > 0)
+            || (bridgeDirectActive && enrichmentRuleCount > 0);
         const visibleProcessingQueueCount = this.plugin.getUniqueProcessingPaths().length;
         const activeRunCount = this.plugin.currentRunIds.size;
         const processingCounts = this.plugin.getProcessingActivityCounts();
-        const duplicateUnlinkedHashCount = this.plugin.getUnlinkedDuplicateRecords().length;
-        const duplicateUnhashedFileCount = this.plugin.getUnhashedFiles().length;
-        const duplicateUnpairedFileCount = this.plugin.getUnpairedFiles().length;
+        const expensiveCounts = this.plugin.getExpensiveHealthCounts();
+        const duplicateUnlinkedHashCount = expensiveCounts.duplicateUnlinkedHashCount;
+        const duplicateUnhashedFileCount = expensiveCounts.duplicateUnhashedFileCount;
+        const duplicateUnpairedFileCount = expensiveCounts.duplicateUnpairedFileCount;
+        const duplicateHashAttentionCount = duplicateUnlinkedHashCount + duplicateUnhashedFileCount;
         const duplicateAttentionCount = duplicateUnlinkedHashCount + duplicateUnhashedFileCount + duplicateUnpairedFileCount;
-        const duplicateProtectionActive = this.plugin.settings.useDuplicateProtection && this.plugin.settings.duplicateDetectionMode !== "off";
-        const recoverUnprocessedBaseFiles = this.plugin.getUnprocessedBaseFiles();
+        const duplicateProtectionActive = this.plugin.settings.duplicateDetectionMode !== "off";
+        const recoverUnprocessedBaseFileCount = expensiveCounts.recoverUnprocessedBaseFileCount;
         const recoverFailedCount = this.plugin.settings.failedFiles.length;
         const recoverProcessedCount = this.plugin.settings.processedFiles.length;
-        const duplicateSolutionAnchorId = duplicateAttentionCount > 0 ? "bfm-autotag-duplicate-cleanup-warning" : undefined;
-        const recoverSolutionAnchorId = recoverFailedCount > 0 || recoverUnprocessedBaseFiles.length > 0 ? "bfm-autotag-fix-recover-warning" : undefined;
-        const setupCheck = this.getHealthCheckFallback("setup-bfm", "Setup - BFM Paths");
-        const analyzerCheck = this.getHealthCheckFallback("ai-analyzer", "AI Tags - AI Image Analyzer");
-        const ollamaCheck = this.getHealthCheckFallback("ai-ollama", "AI Tags - Ollama");
+        const setupProblemLines = this.getSetupProblemWarningLines();
+        const imageAnalysisProblemLines = this.getImageAnalysisProblemWarningLines();
+        const ollamaProblemLines = this.getOllamaProblemWarningLines();
+        const geocodeProblemLines = this.getReverseGeocodeProblemWarningLines();
+        const vaultAwarenessProblemLines = this.getVaultAwarenessProblemWarningLines();
+        const bridgeProblemLines = this.getBridgeDependencyWarningLines();
+        const duplicateSolutionAnchorId = duplicateHashAttentionCount > 0
+            ? "autotag-duplicate-hashes-warning"
+            : duplicateUnpairedFileCount > 0 ? "autotag-duplicate-fix-warning" : undefined;
+        const recoverSolutionAnchorId = recoverFailedCount > 0
+            ? "autotag-failed-files-warning"
+            : recoverUnprocessedBaseFileCount > 0 ? "autotag-unprocessed-files-warning" : undefined;
+        const setupCheck = this.getHealthCheckFallback("setup-paths", "Setup - Companion Paths");
+        const imageAnalysisCheck = this.getHealthCheckFallback("image-analysis", "AI - Image Analysis");
+        const ollamaCheck = this.getHealthCheckFallback("ai-ollama", "AI Tags - Tag Model");
         const geocodeCheck = this.getHealthCheckFallback("geolocation-geocode", "Geolocation Tags - Reverse Geocode");
 
         return [
             {
-                id: "setup-bfm",
-                label: "Setup - BFM Paths",
+                id: "setup-paths",
+                label: "Setup - Companion Paths",
                 icon: this.getSettingsSectionIcon("setup"),
                 targetSectionId: "setup",
-                value: this.healthCheckResults.has("setup-bfm")
+                solutionAnchorId: setupProblemLines.length > 0 ? "autotag-setup-path-warning" : undefined,
+                value: this.healthCheckResults.has("setup-paths")
                     ? setupCheck.value
-                    : baseFolder instanceof TFolder && noteFolder instanceof TFolder ? "Ready" : "Needs check",
+                    : setupProblemLines.length === 0 ? "Ready" : "Needs check",
                 description: setupCheck.message,
                 checks: setupChecks,
-                tone: this.healthCheckResults.has("setup-bfm") ? setupCheck.tone : baseFolder instanceof TFolder && noteFolder instanceof TFolder ? "success" : "danger",
+                tone: this.healthCheckResults.has("setup-paths") ? setupCheck.tone : setupProblemLines.length === 0 ? "success" : "danger",
             },
             {
                 id: "folder-tags",
@@ -9965,20 +12810,22 @@ class BfmAutotagSettingTab extends PluginSettingTab {
                 tone: this.plugin.settings.useFolderTags ? "success" : "neutral",
             },
             {
-                id: "ai-analyzer",
-                label: "AI Tags - AI Image Analyzer",
+                id: "image-analysis",
+                label: "AI - Image Analysis",
                 icon: this.getSettingsSectionIcon("ai-tags"),
                 targetSectionId: "ai-tags",
-                value: analyzerCheck.value,
-                description: analyzerCheck.message,
-                checks: analyzerCheck.checks,
-                tone: analyzerCheck.tone,
+                solutionAnchorId: imageAnalysisProblemLines.length > 0 ? "autotag-image-analysis-warning" : undefined,
+                value: imageAnalysisCheck.value,
+                description: imageAnalysisCheck.message,
+                checks: imageAnalysisCheck.checks,
+                tone: imageAnalysisCheck.tone,
             },
             {
                 id: "ai-ollama",
-                label: "AI Tags - Ollama",
+                label: "AI Tags - Tag Model",
                 icon: this.getSettingsSectionIcon("ai-tags"),
                 targetSectionId: "ai-tags",
+                solutionAnchorId: ollamaProblemLines.length > 0 ? "autotag-ai-ollama-warning" : undefined,
                 value: ollamaCheck.value,
                 description: ollamaCheck.message,
                 checks: ollamaCheck.checks,
@@ -9989,6 +12836,7 @@ class BfmAutotagSettingTab extends PluginSettingTab {
                 label: "Geolocation Tags - Reverse Geocode",
                 icon: this.getSettingsSectionIcon("geolocation"),
                 targetSectionId: "geolocation",
+                solutionAnchorId: geocodeProblemLines.length > 0 ? "autotag-geolocation-warning" : undefined,
                 value: geocodeCheck.value,
                 description: geocodeCheck.message,
                 checks: geocodeCheck.checks,
@@ -9999,52 +12847,67 @@ class BfmAutotagSettingTab extends PluginSettingTab {
                 label: "Properties - Template Check",
                 icon: this.getSettingsSectionIcon("properties"),
                 targetSectionId: "properties",
-                value: templateUnknown.length > 0 ? `${templateUnknown.length} unknown` : "Clean",
+                solutionAnchorId: templateUnknown.length > 0 ? "autotag-properties-template-check-warning" : undefined,
+                value: !templateAvailable ? "Unavailable" : templateUnknown.length > 0 ? `${templateUnknown.length} unknown` : "Clean",
                 description: "",
                 checks: [
-                    { tone: templateUnknown.length > 0 ? "warning" : "success", text: templateUnknown.length > 0 ? "Unknown template entries" : "Template check clean" },
+                    !templateAvailable
+                        ? { tone: "warning", text: "No template file available" }
+                        : { tone: templateUnknown.length > 0 ? "warning" : "success", text: templateUnknown.length > 0 ? "Unknown template entries" : "Template check clean" },
                 ],
-                tone: templateUnknown.length > 0 ? "warning" : "success",
+                tone: !templateAvailable ? "warning" : templateUnknown.length > 0 ? "warning" : "success",
             },
             {
                 id: "properties-template-suggestions",
                 label: "Properties - Template Suggestions",
                 icon: this.getSettingsSectionIcon("properties"),
                 targetSectionId: "properties",
-                value: templateMissing.length > 0 ? `${templateMissing.length} undeclared` : "Declared",
+                solutionAnchorId: templateMissing.length > 0 ? "autotag-properties-template-suggestions-warning" : undefined,
+                value: !templateAvailable ? "Unavailable" : templateMissing.length > 0 ? `${templateMissing.length} undeclared` : "Declared",
                 description: "",
                 checks: [
-                    { tone: templateMissing.length > 0 ? "warning" : "success", text: templateMissing.length > 0 ? "Optional declarations" : "All active properties declared" },
+                    !templateAvailable
+                        ? { tone: "warning", text: "No template file available" }
+                        : { tone: templateMissing.length > 0 ? "warning" : "success", text: templateMissing.length > 0 ? "Optional declarations" : "All active properties declared" },
                 ],
-                tone: templateMissing.length > 0 ? "warning" : "success",
+                tone: !templateAvailable ? "warning" : templateMissing.length > 0 ? "warning" : "success",
             },
             {
                 id: "vault-awareness",
                 label: "Vault Awareness",
                 icon: this.getSettingsSectionIcon("vault-awareness"),
                 targetSectionId: "vault-awareness",
-                value: this.plugin.settings.vaultAwarenessEnabled ? `${vocabularyCount} known` : "Off",
+                solutionAnchorId: vaultAwarenessProblemLines.length > 0 ? "autotag-vault-awareness-warning" : undefined,
+                value: vaultAwarenessProblemLines.length > 0
+                    ? "Needs AI Tags"
+                    : this.plugin.settings.vaultAwarenessEnabled ? `${vocabularyCount} known` : "Off",
                 description: "",
                 checks: [
                     { tone: this.plugin.settings.vaultAwarenessEnabled ? "success" : "neutral", text: this.plugin.settings.vaultAwarenessEnabled ? "Vault Awareness enabled" : "Vault Awareness disabled" },
+                    ...(vaultAwarenessProblemLines.length > 0 ? [{ tone: "warning" as const, text: "AI Tagging is required" }] : []),
                     { tone: vaultCandidateProperties.length > 0 ? "success" : "neutral", text: `${vaultCandidateProperties.length} candidate propert${vaultCandidateProperties.length === 1 ? "y" : "ies"}` },
                     { tone: vocabularyCount > 0 ? "success" : "neutral", text: `${vocabularyCount} known term${vocabularyCount === 1 ? "" : "s"}` },
                 ],
-                tone: this.plugin.settings.vaultAwarenessEnabled && vocabularyCount > 0 ? "success" : "neutral",
+                tone: vaultAwarenessProblemLines.length > 0
+                    ? "warning"
+                    : this.plugin.settings.vaultAwarenessEnabled && vocabularyCount > 0 ? "success" : "neutral",
             },
             {
                 id: "bridge",
                 label: "Bridge",
                 icon: this.getSettingsSectionIcon("bridge"),
                 targetSectionId: "bridge",
-                value: this.plugin.settings.bridgeEnabled ? "On" : "Off",
+                solutionAnchorId: bridgeProblemLines.length > 0 ? "autotag-bridge-dependency-warning" : undefined,
+                value: bridgeProblemLines.length > 0 ? "Needs input" : bridgeHasActiveRules ? "On" : bridgeAnyActive ? "Ready" : "Off",
                 description: "",
                 checks: [
-                    { tone: this.plugin.settings.bridgeEnabled ? "success" : "neutral", text: this.plugin.settings.bridgeEnabled ? "Bridge enabled" : "Bridge disabled" },
-                    { tone: bridgeRuleCount > 0 ? "success" : "neutral", text: `${bridgeRuleCount} subject bridge rule${bridgeRuleCount === 1 ? "" : "s"}` },
-                    { tone: enrichmentRuleCount > 0 ? "success" : "neutral", text: `${enrichmentRuleCount} manual enrichment rule${enrichmentRuleCount === 1 ? "" : "s"}` },
+                    ...(bridgeProblemLines.length > 0 ? [{ tone: "warning" as const, text: "Input dependency needs attention" }] : []),
+                    { tone: bridgeEvidenceActive ? "success" : "neutral", text: bridgeEvidenceActive ? "Evidence-aware rules enabled" : "Evidence-aware rules disabled" },
+                    { tone: bridgeDirectActive ? "success" : "neutral", text: bridgeDirectActive ? "Direct expansion rules enabled" : "Direct expansion rules disabled" },
+                    { tone: bridgeRuleCount > 0 ? "success" : "neutral", text: `${bridgeRuleCount} evidence-aware rule${bridgeRuleCount === 1 ? "" : "s"}` },
+                    { tone: enrichmentRuleCount > 0 ? "success" : "neutral", text: `${enrichmentRuleCount} direct expansion rule${enrichmentRuleCount === 1 ? "" : "s"}` },
                 ],
-                tone: this.plugin.settings.bridgeEnabled && bridgeRuleCount + enrichmentRuleCount > 0 ? "success" : "neutral",
+                tone: bridgeProblemLines.length > 0 ? "warning" : bridgeHasActiveRules ? "success" : "neutral",
             },
             {
                 id: "processing",
@@ -10086,36 +12949,25 @@ class BfmAutotagSettingTab extends PluginSettingTab {
                 description: "",
                 checks: [
                     { tone: recoverFailedCount > 0 ? "danger" : "success", text: recoverFailedCount > 0 ? `${recoverFailedCount} failed file${recoverFailedCount === 1 ? "" : "s"}` : "No failed files" },
-                    { tone: recoverUnprocessedBaseFiles.length > 0 ? "danger" : "success", text: `${recoverUnprocessedBaseFiles.length} unprocessed watched file${recoverUnprocessedBaseFiles.length === 1 ? "" : "s"}` },
+                    { tone: recoverUnprocessedBaseFileCount > 0 ? "danger" : "success", text: `${recoverUnprocessedBaseFileCount} unprocessed watched file${recoverUnprocessedBaseFileCount === 1 ? "" : "s"}` },
                     { tone: "neutral", text: `${recoverProcessedCount} processed file${recoverProcessedCount === 1 ? "" : "s"} tracked` },
                 ],
-                tone: recoverFailedCount > 0 || recoverUnprocessedBaseFiles.length > 0 ? "danger" : "success",
+                tone: recoverFailedCount > 0 || recoverUnprocessedBaseFileCount > 0 ? "danger" : "success",
             },
         ];
     }
 
     renderHealthDashboardCards(containerEl: HTMLElement, cards: HealthDashboardCard[]): Map<string, HealthDashboardCardRefs> {
         const refs = new Map<string, HealthDashboardCardRefs>();
-        const gridEl = containerEl.createDiv({ cls: "bfm-autotag-health-grid bfm-autotag-health-dashboard-grid" });
+        const gridEl = containerEl.createDiv({ cls: "autotag-health-grid autotag-health-dashboard-grid" });
         cards.forEach(card => {
-            const cardEl = gridEl.createDiv({ cls: `bfm-autotag-health-card is-${card.tone ?? "neutral"}` });
+            const cardEl = gridEl.createDiv({ cls: `autotag-health-card is-${card.tone ?? "neutral"}` });
             cardEl.addClass("is-clickable");
             cardEl.tabIndex = 0;
             cardEl.setAttr("role", "button");
-            cardEl.setAttr("aria-label", `Open ${card.label} settings`);
             const openTarget = () => {
-                this.activeSettingsSection = card.targetSectionId;
-                this.display();
-                window.setTimeout(() => {
-                    const solutionEl = card.solutionAnchorId
-                        ? this.containerEl.querySelector(`#${card.solutionAnchorId}`) as HTMLElement | null
-                        : null;
-                    if (solutionEl) {
-                        solutionEl.scrollIntoView({ block: "center", behavior: "smooth" });
-                    } else {
-                        this.scrollSettingsToTop();
-                    }
-                }, 0);
+                const currentCard = this.getHealthDashboardCards().find(candidate => candidate.id === card.id) ?? card;
+                this.openSettingsProblemTarget(currentCard.targetSectionId, currentCard.solutionAnchorId);
             };
             cardEl.addEventListener("click", openTarget);
             cardEl.addEventListener("keydown", event => {
@@ -10123,34 +12975,33 @@ class BfmAutotagSettingTab extends PluginSettingTab {
                 event.preventDefault();
                 openTarget();
             });
-            const labelEl = cardEl.createDiv({ cls: "bfm-autotag-health-card-label" });
-            const iconEl = labelEl.createSpan({ cls: "bfm-autotag-health-card-icon" });
+            const labelEl = cardEl.createDiv({ cls: "autotag-health-card-label" });
+            const iconEl = labelEl.createSpan({ cls: "autotag-health-card-icon" });
             setIcon(iconEl, card.icon);
-            const labelTextEl = labelEl.createSpan({ cls: "bfm-autotag-health-card-label-text" });
+            const labelTextEl = labelEl.createSpan({ cls: "autotag-health-card-label-text" });
             const labelParts = card.label.split(" - ");
-            labelTextEl.createSpan({ text: labelParts[0], cls: "bfm-autotag-health-card-label-main" });
+            labelTextEl.createSpan({ text: labelParts[0], cls: "autotag-health-card-label-main" });
             if (labelParts.length > 1) {
-                labelTextEl.createSpan({ text: labelParts.slice(1).join(" - "), cls: "bfm-autotag-health-card-label-sub" });
+                labelTextEl.createSpan({ text: labelParts.slice(1).join(" - "), cls: "autotag-health-card-label-sub" });
             }
-            if (card.info) {
-                const infoWrapEl = labelEl.createSpan({ cls: "bfm-autotag-health-info-wrap" });
-                infoWrapEl.createSpan({ cls: "bfm-autotag-info-trigger", text: "i" });
-                infoWrapEl.createSpan({ cls: "bfm-autotag-health-info", text: card.info });
-            }
-            const valueEl = cardEl.createDiv({ cls: "bfm-autotag-health-card-value" });
+            const valueEl = cardEl.createDiv({ cls: "autotag-health-card-value" });
             this.renderHealthDashboardValue(valueEl, card);
-            const descriptionEl = cardEl.createDiv({ text: card.description, cls: "bfm-autotag-health-card-description" });
+            const detailsEl = cardEl.createDiv({ cls: "autotag-health-card-details" });
+            const descriptionEl = detailsEl.createDiv({ text: card.description, cls: "autotag-health-card-description" });
             descriptionEl.toggleClass("is-empty", card.description.trim().length === 0);
-            const checksEl = cardEl.createDiv({ cls: "bfm-autotag-health-checks" });
+            const checksEl = detailsEl.createDiv({ cls: "autotag-health-checks" });
             this.renderHealthDashboardChecks(checksEl, card.checks);
-            refs.set(card.id, { cardEl, valueEl, descriptionEl, checksEl });
+            const ref = { cardEl, valueEl, detailsEl, descriptionEl, checksEl, signature: this.getHealthDashboardCardSignature(card) };
+            refs.set(card.id, ref);
         });
         return refs;
     }
 
-    updateHealthDashboardCard(refs: Map<string, HealthDashboardCardRefs>, card: HealthDashboardCard, animate = false): void {
+    updateHealthDashboardCard(refs: Map<string, HealthDashboardCardRefs>, card: HealthDashboardCard, _animate = false): void {
         const ref = refs.get(card.id);
         if (!ref) return;
+        const nextSignature = this.getHealthDashboardCardSignature(card);
+        if (ref.signature === nextSignature) return;
         const update = () => {
             ref.cardEl.classList.remove("is-neutral", "is-success", "is-warning", "is-danger", "is-accent");
             ref.cardEl.addClass(`is-${card.tone ?? "neutral"}`);
@@ -10158,12 +13009,9 @@ class BfmAutotagSettingTab extends PluginSettingTab {
             ref.descriptionEl.setText(card.description);
             ref.descriptionEl.toggleClass("is-empty", card.description.trim().length === 0);
             this.renderHealthDashboardChecks(ref.checksEl, card.checks);
+            ref.signature = nextSignature;
         };
-        if (animate && ref.cardEl.isConnected) {
-            this.animateElementHeightChange(ref.cardEl, update, 280);
-        } else {
-            update();
-        }
+        update();
     }
 
     updateHealthDashboardCards(refs: Map<string, HealthDashboardCardRefs>, animate = false): void {
@@ -10171,14 +13019,14 @@ class BfmAutotagSettingTab extends PluginSettingTab {
     }
 
     renderActiveProcessingImageStrip(containerEl: HTMLElement): () => void {
-        const panelEl = containerEl.createDiv({ cls: "bfm-autotag-active-image-strip-panel" });
-        const headerEl = panelEl.createDiv({ cls: "bfm-autotag-active-image-strip-header" });
-        const titleEl = headerEl.createDiv({ cls: "bfm-autotag-active-image-strip-title" });
-        const titleIconEl = titleEl.createSpan({ cls: "bfm-autotag-active-image-strip-icon" });
+        const panelEl = containerEl.createDiv({ cls: "autotag-active-image-strip-panel" });
+        const headerEl = panelEl.createDiv({ cls: "autotag-active-image-strip-header" });
+        const titleEl = headerEl.createDiv({ cls: "autotag-active-image-strip-title" });
+        const titleIconEl = titleEl.createSpan({ cls: "autotag-active-image-strip-icon" });
         setIcon(titleIconEl, "image");
         titleEl.createSpan({ text: "Active Processing Images" });
-        const queueCountEl = headerEl.createDiv({ cls: "bfm-autotag-active-image-strip-queued" });
-        const rowEl = panelEl.createDiv({ cls: "bfm-autotag-active-image-strip-row" });
+        const queueCountEl = headerEl.createDiv({ cls: "autotag-active-image-strip-queued" });
+        const rowEl = panelEl.createDiv({ cls: "autotag-active-image-strip-row" });
         let renderedSignature = "";
 
         const update = () => {
@@ -10196,13 +13044,13 @@ class BfmAutotagSettingTab extends PluginSettingTab {
             rowEl.empty();
             panelEl.toggleClass("is-idle", activeFiles.length === 0);
             if (activeFiles.length === 0) {
-                const emptyEl = rowEl.createDiv({ cls: "bfm-autotag-active-image-strip-empty" });
+                const emptyEl = rowEl.createDiv({ cls: "autotag-active-image-strip-empty" });
                 emptyEl.setText("No images are actively processing.");
                 return;
             }
 
             activeFiles.forEach(file => {
-                const itemEl = rowEl.createDiv({ cls: "bfm-autotag-active-image-thumb" });
+                const itemEl = rowEl.createDiv({ cls: "autotag-active-image-thumb" });
                 itemEl.setAttr("title", file.path);
                 const imageEl = itemEl.createEl("img", {
                     attr: {
@@ -10212,7 +13060,7 @@ class BfmAutotagSettingTab extends PluginSettingTab {
                 });
                 imageEl.addEventListener("error", () => {
                     itemEl.empty();
-                    const fallbackEl = itemEl.createDiv({ cls: "bfm-autotag-active-image-thumb-fallback" });
+                    const fallbackEl = itemEl.createDiv({ cls: "autotag-active-image-thumb-fallback" });
                     setIcon(fallbackEl, "file-image");
                 });
             });
@@ -10251,28 +13099,26 @@ class BfmAutotagSettingTab extends PluginSettingTab {
     async runAllHealthChecks(refs: Map<string, HealthDashboardCardRefs>): Promise<void> {
         this.updateHealthDashboardCards(refs);
         await Promise.all([
-            this.runHealthCheck("setup-bfm", refs, () => this.checkSetupBfmPaths()),
-            this.runHealthCheck("ai-analyzer", refs, () => this.checkAiImageAnalyzer()),
+            this.runHealthCheck("setup-paths", refs, () => this.checkSetupPaths()),
+            this.runHealthCheck("image-analysis", refs, () => this.checkImageAnalysis()),
             this.runHealthCheck("ai-ollama", refs, () => this.checkOllama()),
             this.runHealthCheck("geolocation-geocode", refs, () => this.checkReverseGeocode()),
         ]);
         this.updateHealthDashboardCards(refs, true);
     }
 
-    async checkSetupBfmPaths(): Promise<HealthCheckResult> {
+    async checkSetupPaths(): Promise<HealthCheckResult> {
         const normalizeFolder = (path: string, fallback: string) => (path.trim() || fallback).replace(/\\/g, "/").replace(/^\/+|\/+$/g, "");
         const basePath = normalizeFolder(this.plugin.settings.basePath, DEFAULT_SETTINGS.basePath);
-        const notePath = normalizeFolder(this.plugin.settings.bfmNewFileLocation, DEFAULT_SETTINGS.bfmNewFileLocation);
+        const notePath = this.plugin.getEffectiveCompanionNoteFolder();
         const issues: string[] = [];
         const baseFolder = this.app.vault.getAbstractFileByPath(basePath);
         const noteFolder = this.app.vault.getAbstractFileByPath(notePath);
-        const bfmPlugin = (this.app as any).plugins?.plugins?.["obsidian-binary-file-manager-plugin"];
 
         if (!(baseFolder instanceof TFolder)) issues.push(`Base Path not found: ${basePath}`);
-        if (!(noteFolder instanceof TFolder)) issues.push(`BFM New File Location not found: ${notePath}`);
-        if (!bfmPlugin) issues.push("Binary File Manager is not loaded.");
+        if (!(noteFolder instanceof TFolder)) issues.push(`Companion Note Folder not found: ${notePath}`);
 
-        const exampleNoteName = this.plugin.renderBfmFileNameFormatFromParts("Example.jpg", `${basePath}/Example.jpg`, "jpg");
+        const exampleNoteName = this.plugin.renderCompanionNoteNameFormatFromParts("Example.jpg", `${basePath}/Example.jpg`, "jpg");
         const checks = this.getSetupHealthChecks(baseFolder, noteFolder, exampleNoteName);
         if (issues.length > 0) {
             return { tone: "danger", value: "Missing", message: "", checks };
@@ -10280,46 +13126,53 @@ class BfmAutotagSettingTab extends PluginSettingTab {
         return { tone: "success", value: "Ready", message: "", checks };
     }
 
-    async checkAiImageAnalyzer(): Promise<HealthCheckResult> {
-        const analyzer = this.plugin.getAIImageAnalyzer();
-        if (!analyzer) {
+    async checkImageAnalysis(): Promise<HealthCheckResult> {
+        if (!this.plugin.settings.imageAnalysisEnabled) {
             return {
-                tone: "danger",
-                value: "Missing",
+                tone: "neutral",
+                value: "Off",
                 message: "",
-                checks: [{ tone: "danger", text: "AI Image Analyzer API loaded" }],
+                checks: [{ tone: "neutral", text: "Image Analysis disabled" }],
             };
         }
-        if (typeof analyzer.analyzeImage !== "function" || typeof analyzer.canBeAnalyzed !== "function") {
+
+        const selectedModel = this.plugin.getOllamaVisionModel();
+        const response = await requestUrl({
+            url: this.plugin.getOllamaTagsUrl(),
+            method: "GET",
+            throw: false,
+        });
+        if (response.status < 200 || response.status >= 300) {
             return {
                 tone: "danger",
-                value: "API mismatch",
+                value: "Failed",
+                message: "",
+                checks: [{ tone: "danger", text: `Ollama reachable: ${response.status}` }],
+            };
+        }
+        const models = Array.isArray(response.json?.models)
+            ? response.json.models.map((model: any) => model?.name).filter((name: unknown): name is string => typeof name === "string")
+            : [];
+        if (models.length === 0) {
+            return {
+                tone: "danger",
+                value: "No models",
                 message: "",
                 checks: [
-                    { tone: "success", text: "AI Image Analyzer API loaded" },
-                    { tone: "danger", text: "Expected API methods available" },
+                    { tone: "success", text: "Ollama reachable" },
+                    { tone: "danger", text: "Pulled vision models listed" },
                 ],
             };
         }
-
-        const watchedFiles = this.plugin.getHashableBaseFiles();
-        const analyzableFile = watchedFiles.find(file => {
-            try {
-                return analyzer.canBeAnalyzed(file);
-            } catch (_) {
-                return false;
-            }
-        });
-
-        if (!analyzableFile) {
+        if (!this.plugin.hasPulledOllamaModel(models, selectedModel)) {
             return {
-                tone: watchedFiles.length > 0 ? "danger" : "neutral",
-                value: watchedFiles.length > 0 ? "No match" : "Ready",
+                tone: "danger",
+                value: "Model missing",
                 message: "",
                 checks: [
-                    { tone: "success", text: "AI Image Analyzer API loaded" },
-                    { tone: "success", text: "Expected API methods available" },
-                    { tone: watchedFiles.length > 0 ? "danger" : "neutral", text: watchedFiles.length > 0 ? "No watched test file accepted" : "No watched test file available" },
+                    { tone: "success", text: "Ollama reachable" },
+                    { tone: "success", text: "Pulled models listed" },
+                    { tone: "danger", text: `${selectedModel} pulled` },
                 ],
             };
         }
@@ -10329,14 +13182,22 @@ class BfmAutotagSettingTab extends PluginSettingTab {
             value: "Ready",
             message: "",
             checks: [
-                { tone: "success", text: "AI Image Analyzer API loaded" },
-                { tone: "success", text: "Expected API methods available" },
-                { tone: "success", text: "Watched test file accepted" },
+                { tone: "success", text: "Ollama reachable" },
+                { tone: "success", text: "Pulled models listed" },
+                { tone: "success", text: `${selectedModel} pulled` },
             ],
         };
     }
 
     async checkOllama(): Promise<HealthCheckResult> {
+        if (!this.plugin.settings.aiTaggingEnabled) {
+            return {
+                tone: "neutral",
+                value: "Off",
+                message: "",
+                checks: [{ tone: "neutral", text: "AI Tagging disabled" }],
+            };
+        }
         const selectedModel = this.plugin.settings.ollamaModel.trim() || DEFAULT_SETTINGS.ollamaModel;
         const response = await requestUrl({
             url: this.plugin.getOllamaTagsUrl(),
@@ -10365,7 +13226,7 @@ class BfmAutotagSettingTab extends PluginSettingTab {
                 ],
             };
         }
-        if (!models.includes(selectedModel)) {
+        if (!this.plugin.hasPulledOllamaModel(models, selectedModel)) {
             return {
                 tone: "danger",
                 value: "Model missing",
@@ -10418,7 +13279,7 @@ class BfmAutotagSettingTab extends PluginSettingTab {
             message: "",
             checks: [
                 { tone: "success", text: "Reverse geocode provider selected" },
-                { tone: "success", text: `${providerName} answered for ${location}` },
+                { tone: "success", text: `${providerName}: ${location}` },
                 { tone: this.plugin.settings.geolocationEnabled ? "success" : "neutral", text: this.plugin.settings.geolocationEnabled ? "Geolocation Tags enabled" : "Geolocation Tags disabled" },
             ],
         };
@@ -10461,12 +13322,12 @@ class BfmAutotagSettingTab extends PluginSettingTab {
 
     renderProcessingLiveStatus(containerEl: HTMLElement): void {
         this.resetProcessingStatusTimer();
-        const wrapper = containerEl.createDiv({ cls: "bfm-autotag-progress-notice bfm-autotag-processing-live-status" });
-        const header = wrapper.createDiv({ cls: "bfm-autotag-progress-header" });
-        header.createDiv({ cls: "bfm-autotag-progress-spinner" });
-        const text = header.createDiv({ cls: "bfm-autotag-progress-text" });
-        const titleEl = text.createDiv({ cls: "bfm-autotag-progress-title" });
-        const subtitleEl = text.createDiv({ cls: "bfm-autotag-progress-subtitle" });
+        const wrapper = containerEl.createDiv({ cls: "autotag-progress-notice autotag-processing-live-status" });
+        const header = wrapper.createDiv({ cls: "autotag-progress-header" });
+        header.createDiv({ cls: "autotag-progress-spinner" });
+        const text = header.createDiv({ cls: "autotag-progress-text" });
+        const titleEl = text.createDiv({ cls: "autotag-progress-title" });
+        const subtitleEl = text.createDiv({ cls: "autotag-progress-subtitle" });
 
         const update = () => {
             if (!wrapper.isConnected) {
@@ -10479,7 +13340,7 @@ class BfmAutotagSettingTab extends PluginSettingTab {
             subtitleEl.empty();
             if (busy) {
                 subtitleEl.createSpan({ text: `Processing ${counts.completed}/${counts.total || counts.visible} Files` });
-                const dotsEl = subtitleEl.createSpan({ cls: "bfm-autotag-loading-dots" });
+                const dotsEl = subtitleEl.createSpan({ cls: "autotag-loading-dots" });
                 [0, 1, 2].forEach(() => dotsEl.createSpan({ text: "." }));
             } else {
                 subtitleEl.setText("Queue idle");
@@ -10494,7 +13355,7 @@ class BfmAutotagSettingTab extends PluginSettingTab {
 
     createSettingsAnchor(containerEl: HTMLElement, id: string, title: string): void {
         const heading = containerEl.createEl("h3", { text: title });
-        heading.id = `bfm-autotag-${id}`;
+        heading.id = `autotag-${id}`;
         this.decorateHeadingWithIcon(heading, this.getSettingsSectionIcon(id));
     }
 
@@ -10584,11 +13445,11 @@ class BfmAutotagSettingTab extends PluginSettingTab {
     wrapSubcategoryPanels(rootEl: HTMLElement): void {
         const headings = Array.from(rootEl.querySelectorAll("h4")) as HTMLElement[];
         headings.forEach(heading => {
-            if (heading.parentElement?.hasClass("bfm-autotag-subcategory-panel")) return;
+            if (heading.parentElement?.hasClass("autotag-subcategory-panel")) return;
             const parent = heading.parentElement;
             if (!parent) return;
             const panel = document.createElement("div");
-            panel.addClass("bfm-autotag-subcategory-panel");
+            panel.addClass("autotag-subcategory-panel");
             parent.insertBefore(panel, heading);
 
             let node: ChildNode | null = heading;
@@ -10620,7 +13481,7 @@ class BfmAutotagSettingTab extends PluginSettingTab {
         const nameEl = settingEl.querySelector(".setting-item-name") as HTMLElement | null;
         if (!nameEl) return "Unnamed setting";
         const clone = nameEl.cloneNode(true) as HTMLElement;
-        clone.querySelectorAll(".bfm-autotag-info-trigger").forEach(el => el.remove());
+        clone.querySelectorAll(".autotag-info-trigger").forEach(el => el.remove());
         return clone.textContent?.trim() || "Unnamed setting";
     }
 
@@ -10628,7 +13489,7 @@ class BfmAutotagSettingTab extends PluginSettingTab {
         const descriptionEl = settingEl.querySelector(".setting-item-description") as HTMLElement | null;
         if (!descriptionEl) return "";
         const clone = descriptionEl.cloneNode(true) as HTMLElement;
-        clone.querySelectorAll(".bfm-autotag-info-trigger, datalist").forEach(el => el.remove());
+        clone.querySelectorAll(".autotag-info-trigger, datalist").forEach(el => el.remove());
         return clone.textContent?.replace(/\s+/g, " ").trim() || "";
     }
 
@@ -10648,16 +13509,16 @@ class BfmAutotagSettingTab extends PluginSettingTab {
     createSettingsSearchSection(wrappers: Map<string, HTMLElement>): HTMLElement {
         const sections = this.getSettingsSections();
         const wrapper = document.createElement("div");
-        wrapper.addClass("bfm-autotag-settings-section");
+        wrapper.addClass("autotag-settings-section");
         wrapper.dataset.section = "search";
         const heading = wrapper.createEl("h3", { text: "Search" });
-        heading.id = "bfm-autotag-search";
+        heading.id = "autotag-search";
 
         const inputSetting = new Setting(wrapper)
             .setName("Search Settings")
             .setDesc("Searches names and description text across every settings tab.");
         let searchInput: HTMLInputElement;
-        const resultsEl = wrapper.createDiv({ cls: "bfm-autotag-settings-search-results bfm-autotag-settings-search-results-list" });
+        const resultsEl = wrapper.createDiv({ cls: "autotag-settings-search-results autotag-settings-search-results-list" });
 
         const allResults = () => Array.from(wrappers.entries())
             .filter(([sectionId]) => sectionId !== "search")
@@ -10678,15 +13539,15 @@ class BfmAutotagSettingTab extends PluginSettingTab {
             result: ReturnType<typeof allResults>[number],
             descriptionExcerpt?: string
         ) => {
-            const button = resultsEl.createEl("button", { cls: "bfm-autotag-settings-search-result" });
+            const button = resultsEl.createEl("button", { cls: "autotag-settings-search-result" });
             button.type = "button";
-            const iconEl = button.createSpan({ cls: "bfm-autotag-settings-search-result-icon" });
+            const iconEl = button.createSpan({ cls: "autotag-settings-search-result-icon" });
             setIcon(iconEl, result.sectionIcon);
-            const textEl = button.createDiv({ cls: "bfm-autotag-settings-search-result-text" });
-            textEl.createSpan({ text: result.name, cls: "bfm-autotag-settings-search-result-name" });
-            textEl.createSpan({ text: ` - ${result.sectionLabel}`, cls: "bfm-autotag-settings-search-result-section" });
+            const textEl = button.createDiv({ cls: "autotag-settings-search-result-text" });
+            textEl.createSpan({ text: result.name, cls: "autotag-settings-search-result-name" });
+            textEl.createSpan({ text: ` - ${result.sectionLabel}`, cls: "autotag-settings-search-result-section" });
             if (descriptionExcerpt) {
-                textEl.createDiv({ text: descriptionExcerpt, cls: "bfm-autotag-settings-search-result-excerpt" });
+                textEl.createDiv({ text: descriptionExcerpt, cls: "autotag-settings-search-result-excerpt" });
             }
             button.onclick = () => {
                 this.activeSettingsSection = result.sectionId;
@@ -10743,20 +13604,20 @@ class BfmAutotagSettingTab extends PluginSettingTab {
 
     organizeRenderedSettingsSections(containerEl: HTMLElement): void {
         const sectionOrder = this.getSettingsSections();
-        const headings = Array.from(containerEl.querySelectorAll("h3[id^='bfm-autotag-']")) as HTMLElement[];
+        const headings = Array.from(containerEl.querySelectorAll("h3[id^='autotag-']")) as HTMLElement[];
         const wrappers = new Map<string, HTMLElement>();
 
         headings.forEach(heading => {
-            const id = heading.id.replace("bfm-autotag-", "");
+            const id = heading.id.replace("autotag-", "");
             const wrapper = document.createElement("div");
-            wrapper.addClass("bfm-autotag-settings-section");
+            wrapper.addClass("autotag-settings-section");
             wrapper.dataset.section = id;
 
             let node: ChildNode | null = heading;
             while (node) {
                 const next: ChildNode | null = node.nextSibling;
                 wrapper.appendChild(node);
-                if (next instanceof HTMLElement && next.matches("h3[id^='bfm-autotag-']")) break;
+                if (next instanceof HTMLElement && next.matches("h3[id^='autotag-']")) break;
                 node = next;
             }
             wrappers.set(id, wrapper);
@@ -10765,13 +13626,11 @@ class BfmAutotagSettingTab extends PluginSettingTab {
         this.moveHeadingGroup(wrappers.get("folder-tags"), wrappers.get("properties"), "Frontmatter");
         this.moveHeadingGroup(wrappers.get("qol"), wrappers.get("duplicates"), "Fix");
         this.moveSettingWithFollowingDescriptions(wrappers.get("qol"), wrappers.get("processing"), "Shutdown Protection");
-        this.removeSettingRangeByName(wrappers.get("properties"), "Tags generated by AI", "Description generated by AI");
-        this.removeSettingRangeByName(wrappers.get("duplicates"), "Filename Candidate Mode", "Folder Tags Candidate Mode");
         wrappers.set("search", this.createSettingsSearchSection(wrappers));
         wrappers.forEach(wrapper => this.wrapSubcategoryPanels(wrapper));
         wrappers.forEach(wrapper => this.decorateSettingsHeadings(wrapper));
 
-        const contentEl = containerEl.createDiv({ cls: "bfm-autotag-settings-tab-content" });
+        const contentEl = containerEl.createDiv({ cls: "autotag-settings-tab-content" });
         sectionOrder.forEach(section => {
             const wrapper = wrappers.get(section.id);
             if (!wrapper) return;
@@ -10787,7 +13646,7 @@ class BfmAutotagSettingTab extends PluginSettingTab {
         containerEl.style.overflow = "";
         containerEl.style.opacity = "";
         containerEl.style.transform = "";
-        const bodyEls = Array.from(containerEl.querySelectorAll(".bfm-autotag-animated-section-body")) as HTMLElement[];
+        const bodyEls = Array.from(containerEl.querySelectorAll(".autotag-animated-section-body")) as HTMLElement[];
         bodyEls.forEach(bodyEl => {
             bodyEl.style.display = "";
             bodyEl.style.height = "";
@@ -10798,9 +13657,65 @@ class BfmAutotagSettingTab extends PluginSettingTab {
             bodyEl.addClass("is-open");
         });
     }
-    renderAiGeneratedPropertySettings(containerEl: HTMLElement): void {
-        containerEl.createEl("h4", { text: "AI Properties" });
-        new Setting(containerEl)
+
+    setSettingNameWithIcon(setting: Setting, name: string, icon: string): Setting {
+        const fragment = document.createDocumentFragment();
+        const iconEl = document.createElement("span");
+        iconEl.addClass("autotag-setting-name-icon");
+        setIcon(iconEl, icon);
+        fragment.appendChild(iconEl);
+        const textEl = document.createElement("span");
+        textEl.textContent = name;
+        fragment.appendChild(textEl);
+        setting.setName(fragment);
+        return setting;
+    }
+
+    addCandidateModeDropdown(
+        setting: Setting,
+        value: CandidateMode,
+        onChange: (value: CandidateMode) => Promise<void> | void
+    ): Setting {
+        setting.addDropdown(dropdown => dropdown
+            .addOption("disabled", "Disabled")
+            .addOption("consider", "Consider")
+            .addOption("all", "All Keywords")
+            .addOption("exclude", "Exclude")
+            .setValue(value)
+            .onChange(async nextValue => {
+                await onChange(nextValue as CandidateMode);
+            }));
+        return setting;
+    }
+
+    renderAiDescriptionPropertySettings(containerEl: HTMLElement): void {
+        containerEl.createEl("h4", { text: "Image Description" });
+        const aiDescriptionPropertySetting = new Setting(containerEl)
+            .setName("Description generated by AI")
+            .setDesc("Property used for the AI-generated image description. Notice: Empty Fallback to Default.")
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.aiDescriptionPropertyEnabled)
+                .onChange(async value => {
+                    this.plugin.settings.aiDescriptionPropertyEnabled = value;
+                    await this.plugin.saveSettings();
+                    this.refreshDisplayAnimated();
+                }))
+            .addText(text => {
+                this.attachTextSuggestions(text.inputEl, this.getPropertyNameSuggestions());
+                text.setPlaceholder(DEFAULT_SETTINGS.aiDescriptionPropertyName)
+                    .setValue(this.plugin.settings.aiDescriptionPropertyName)
+                    .onChange(async value => {
+                        this.plugin.settings.aiDescriptionPropertyName = this.plugin.normalizePropertyName(value, DEFAULT_SETTINGS.aiDescriptionPropertyName);
+                        await this.plugin.saveSettings();
+                    });
+            });
+        aiDescriptionPropertySetting.settingEl.id = "autotag-ai-description-property";
+    }
+
+    renderAiGeneratedPropertySettings(containerEl: HTMLElement, refreshAiInputSummary?: () => void): void {
+        containerEl.createEl("h4", { text: "AI Tags" });
+
+        const aiTagsPropertySetting = new Setting(containerEl)
             .setName("Tags generated by AI")
             .setDesc("Property used for AI-generated tags. Notice: Empty Fallback to Default.")
             .addToggle(toggle => toggle
@@ -10808,6 +13723,8 @@ class BfmAutotagSettingTab extends PluginSettingTab {
                 .onChange(async value => {
                     this.plugin.settings.aiTagsPropertyEnabled = value;
                     await this.plugin.saveSettings();
+                    refreshAiInputSummary?.();
+                    this.refreshDisplayAnimated();
                 }))
             .addText(text => {
                 this.attachTextSuggestions(text.inputEl, this.getPropertyNameSuggestions());
@@ -10816,21 +13733,11 @@ class BfmAutotagSettingTab extends PluginSettingTab {
                     .onChange(async value => {
                         this.plugin.settings.aiTagsPropertyName = this.plugin.normalizePropertyName(value, DEFAULT_SETTINGS.aiTagsPropertyName);
                         await this.plugin.saveSettings();
-                        if (this.plugin.settings.aiTagsUseAsVaultCandidate) this.plugin.buildVaultVocabularyCache();
+                        if (this.plugin.settings.aiTagsUseAsVaultCandidate) this.plugin.scheduleVaultVocabularyCacheBuild();
+                        refreshAiInputSummary?.();
                     });
             });
-
-        new Setting(containerEl)
-            .setName("Use as Vault Awareness Candidates")
-            .setDesc("Allows values written to the AI tags property to become known vocabulary for Vault Awareness.")
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.aiTagsUseAsVaultCandidate)
-                .onChange(async value => {
-                    this.plugin.settings.aiTagsUseAsVaultCandidate = value;
-                    await this.plugin.saveSettings();
-                    this.plugin.buildVaultVocabularyCache();
-                }));
-
+        aiTagsPropertySetting.settingEl.id = "autotag-ai-tags-property";
 
         const aiTagsFormatSetting = new Setting(containerEl)
             .setName("AI tag format")
@@ -10849,38 +13756,180 @@ class BfmAutotagSettingTab extends PluginSettingTab {
                 await this.plugin.saveSettings();
             }));
 
-        new Setting(containerEl)
-            .setName("Description generated by AI")
-            .setDesc("Property used for the AI-generated image description. Notice: Empty Fallback to Default.")
+        let removeFolderWarningHostEl: HTMLElement | null = null;
+        const renderRemoveFolderWarning = () => {
+            if (!removeFolderWarningHostEl) return;
+            removeFolderWarningHostEl.empty();
+            this.renderInlineDependencyWarning(
+                removeFolderWarningHostEl,
+                "Folder Tags are off",
+                this.plugin.settings.removeFolderTagsFromAiTags && !this.plugin.settings.useFolderTags
+                    ? ["This cleanup is enabled, but Folder Tags are currently disabled. It will apply once Folder Tags are enabled."]
+                    : [],
+                this.getSettingsSectionIcon("folder-tags")
+            );
+        };
+        this.setSettingNameWithIcon(
+            new Setting(containerEl)
+            .setDesc("Keeps Folder Tags available as AI context, but removes exact values already written by Folder Tags before writing the AI tags property.")
             .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.aiDescriptionPropertyEnabled)
+                .setValue(this.plugin.settings.removeFolderTagsFromAiTags)
                 .onChange(async value => {
-                    this.plugin.settings.aiDescriptionPropertyEnabled = value;
+                    this.plugin.settings.removeFolderTagsFromAiTags = value;
                     await this.plugin.saveSettings();
-                }))
-            .addText(text => {
-                this.attachTextSuggestions(text.inputEl, this.getPropertyNameSuggestions());
-                text.setPlaceholder(DEFAULT_SETTINGS.aiDescriptionPropertyName)
-                    .setValue(this.plugin.settings.aiDescriptionPropertyName)
-                    .onChange(async value => {
-                        this.plugin.settings.aiDescriptionPropertyName = this.plugin.normalizePropertyName(value, DEFAULT_SETTINGS.aiDescriptionPropertyName);
-                        await this.plugin.saveSettings();
-                    });
-            });
+                    this.animateInlineDependencyWarning(removeFolderWarningHostEl!, renderRemoveFolderWarning);
+                })),
+            "Keep Folder Tags values out of AI Tags",
+            this.getSettingsSectionIcon("folder-tags")
+        );
+        removeFolderWarningHostEl = containerEl.createDiv();
+        renderRemoveFolderWarning();
 
-        new Setting(containerEl)
-            .setName("Use Geolocation to enhance Description")
-            .setDesc("When Geolocation Tags are enabled and GPS data is available, Autotag uses the known location metadata to correct or avoid guessed location claims in the AI description.")
+        let removeGeoWarningHostEl: HTMLElement | null = null;
+        const renderRemoveGeoWarning = () => {
+            if (!removeGeoWarningHostEl) return;
+            removeGeoWarningHostEl.empty();
+            this.renderInlineDependencyWarning(
+                removeGeoWarningHostEl,
+                "Geolocation Tags are off",
+                this.plugin.settings.removeGeolocationFromAiTags && !this.plugin.settings.geolocationEnabled
+                    ? ["This cleanup is enabled, but Geolocation Tags are currently disabled. It will apply once Geolocation Tags are enabled."]
+                    : [],
+                this.getSettingsSectionIcon("geolocation")
+            );
+        };
+        this.setSettingNameWithIcon(
+            new Setting(containerEl)
+            .setDesc("Keeps GPS and reverse-geocode values available as AI context, but removes matching place, landmark, address, GPS label, latitude, longitude, and coordinate terms before writing the AI tags property.")
             .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.useGeolocationForAiDescription)
+                .setValue(this.plugin.settings.removeGeolocationFromAiTags)
                 .onChange(async value => {
-                    this.plugin.settings.useGeolocationForAiDescription = value;
+                    this.plugin.settings.removeGeolocationFromAiTags = value;
                     await this.plugin.saveSettings();
-                }));
+                    this.animateInlineDependencyWarning(removeGeoWarningHostEl!, renderRemoveGeoWarning);
+                })),
+            "Keep geolocation values out of AI Tags",
+            this.getSettingsSectionIcon("geolocation")
+        );
+        removeGeoWarningHostEl = containerEl.createDiv();
+        renderRemoveGeoWarning();
+
+        let aiTagsVaultWarningHostEl: HTMLElement | null = null;
+        const renderAiTagsVaultWarning = () => {
+            if (!aiTagsVaultWarningHostEl) return;
+                aiTagsVaultWarningHostEl.empty();
+                this.renderInlineDependencyWarning(
+                    aiTagsVaultWarningHostEl,
+                    "Advanced AI Tags vocabulary source",
+                    this.getVaultVocabularyAdvancedWarningLines(
+                        this.plugin.settings.aiTagsUseAsVaultCandidate,
+                        this.plugin.settings.vaultAwarenessEnabled,
+                        "ai-tags"
+                    ),
+                    this.getSettingsSectionIcon("vault-awareness")
+                );
+            };
+        aiTagsVaultWarningHostEl = containerEl.createDiv();
+        renderAiTagsVaultWarning();
+        this.setSettingNameWithIcon(
+            new Setting(containerEl)
+            .setDesc("Scans the selected AI tags property across the whole vault. Every existing frontmatter value found there can become known vocabulary for Vault Awareness, not only values from the file currently being processed.")
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.aiTagsUseAsVaultCandidate)
+                .onChange(async value => {
+                    this.plugin.settings.aiTagsUseAsVaultCandidate = value;
+                    await this.plugin.saveSettings();
+                    this.plugin.scheduleVaultVocabularyCacheBuild();
+                    refreshAiInputSummary?.();
+                    this.animateInlineDependencyWarning(aiTagsVaultWarningHostEl!, renderAiTagsVaultWarning);
+                })),
+            "Use property as Vault Awareness vocabulary",
+            this.getSettingsSectionIcon("vault-awareness")
+        );
+
     }
 
-    renderAiCandidateModeSettings(containerEl: HTMLElement): void {
-        containerEl.createEl("h4", { text: "Candidate Modes" });
+    getCandidateModeLabel(mode: CandidateMode): string {
+        if (mode === "all") return "All Keywords";
+        if (mode === "consider") return "Consider";
+        if (mode === "exclude") return "Exclude";
+        return "Disabled";
+    }
+
+    getAiInputCandidatePills(): string[] {
+        const pills: string[] = [];
+        const seen = new Set<string>();
+        const add = (value: string) => {
+            const text = value.trim();
+            const key = text.toLowerCase();
+            if (!text || seen.has(key)) return;
+            seen.add(key);
+            pills.push(text);
+        };
+
+        if (this.plugin.settings.filenameCandidateMode !== "disabled") {
+            add(`Filename: ${this.getCandidateModeLabel(this.plugin.settings.filenameCandidateMode)}`);
+        }
+
+        if (this.plugin.settings.useFolderTags) {
+            this.plugin.getFolderPropertyMappings()
+                .forEach(mapping => {
+                    const mode = this.plugin.getFolderMappingAiCandidateMode(mapping);
+                    if (mode !== "disabled") add(`Folder property: ${mapping.property} (${this.getCandidateModeLabel(mode)})`);
+                });
+
+            const fallbackMode = this.plugin.getFolderFallbackAiCandidateMode();
+            if (fallbackMode !== "disabled") {
+                add(`Folder fallback: ${this.plugin.normalizeFolderFallbackProperty(this.plugin.settings.folderFallbackProperty)} (${this.getCandidateModeLabel(fallbackMode)})`);
+            }
+        }
+
+        if (this.plugin.settings.geolocationEnabled && this.plugin.settings.useGeolocationForAiTags) {
+            add("Geolocation metadata");
+        }
+
+        if (this.plugin.settings.vaultAwarenessEnabled) {
+            this.plugin.getVaultAwarenessCandidateProperties()
+                .forEach(property => add(`Vault Awareness source: ${property}`));
+            if (!this.plugin.settings.vaultAwarenessOutputEnabled || !this.plugin.settings.vaultAwarenessOutputExclusive) {
+                add("Vault Awareness: Enabled");
+            }
+        }
+
+        if (this.plugin.settings.bridgeEnabled && this.plugin.getCombinedBridgeRuleText().trim()) {
+            add("Bridge: evidence-aware rules");
+        }
+        if (this.plugin.settings.manualEnrichmentEnabled && this.plugin.getCombinedBridgeRuleText().trim()) {
+            add("Bridge: direct expansion rules");
+        }
+
+        return pills;
+    }
+
+    renderAiInputCandidatePills(containerEl: HTMLElement): void {
+        containerEl.empty();
+        const candidatePanelEl = containerEl.createDiv({ cls: "autotag-property-panel autotag-ai-input-candidates-panel" });
+        candidatePanelEl.createEl("h5", { text: "Current AI Input Sources" });
+        const pills = this.getAiInputCandidatePills();
+        candidatePanelEl.createEl("p", {
+            text: pills.length > 0
+                ? "These configured sources can currently influence AI tagging or its final routed output."
+                : "No optional AI input sources are currently active beyond the image description.",
+            cls: "setting-item-description",
+        });
+        const listEl = candidatePanelEl.createDiv({ cls: "autotag-vault-candidate-list autotag-ai-input-candidate-list" });
+        pills.forEach(pill => {
+            listEl.createSpan({ text: pill, cls: "autotag-vault-candidate-chip autotag-ai-input-candidate-chip" });
+        });
+    }
+
+    renderAiInputSettings(containerEl: HTMLElement): () => void {
+        containerEl.createEl("h4", { text: "AI Input" });
+        let summaryHostEl: HTMLElement | null = null;
+        const refreshSummary = () => {
+            if (summaryHostEl) this.renderAiInputCandidatePills(summaryHostEl);
+        };
+
         new Setting(containerEl)
             .setName("Filename Candidate Mode")
             .setDesc("Controls whether words from the image file name are used for AI tags.")
@@ -10893,88 +13942,133 @@ class BfmAutotagSettingTab extends PluginSettingTab {
                 .onChange(async (value) => {
                     this.plugin.settings.filenameCandidateMode = value as CandidateMode;
                     await this.plugin.saveSettings();
+                    refreshSummary();
                 }));
         new Setting(containerEl)
-            .setName("Folder Tags Candidate Mode")
-            .setDesc("Controls whether enabled folder-derived keywords are used for AI tags. Exclude prevents current folder-derived terms from being written to aitags, even if they appear through another route.")
-            .addDropdown(dropdown => dropdown
-                .addOption("disabled", "Disabled")
-                .addOption("consider", "Consider")
-                .addOption("all", "All Keywords")
-                .addOption("exclude", "Exclude")
-                .setValue(this.plugin.settings.folderTagsCandidateMode)
-                .onChange(async (value) => {
-                    this.plugin.settings.folderTagsCandidateMode = value as CandidateMode;
+            .setName("Only use human-readable filename text")
+            .setDesc("Failsafe cleanup for filename and identifier noise. Other systems may already sort noisy names out; this additionally ignores camera names, screenshots, hashes, timestamps, counters, and mostly-number filenames before filename candidates are sent to AI, removes matching filename artifacts from returned AI tags, and strips unsupported image-code or identifier guesses from AI descriptions.")
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.filenameCandidatesHumanReadableOnly)
+                .onChange(async value => {
+                    this.plugin.settings.filenameCandidatesHumanReadableOnly = value;
                     await this.plugin.saveSettings();
+                    refreshSummary();
                 }));
+
+        let geolocationAiWarningHostEl: HTMLElement | null = null;
+        const renderGeolocationAiWarning = () => {
+            if (!geolocationAiWarningHostEl) return;
+            geolocationAiWarningHostEl.empty();
+            this.renderInlineDependencyWarning(
+                geolocationAiWarningHostEl,
+                "Geolocation Tags are off",
+                (this.plugin.settings.useGeolocationForAiTags || this.plugin.settings.useGeolocationForAiDescription) && !this.plugin.settings.geolocationEnabled
+                    ? ["This AI context source is enabled, but Geolocation Tags are currently disabled."]
+                    : [],
+                this.getSettingsSectionIcon("geolocation")
+            );
+        };
+        this.setSettingNameWithIcon(
+            new Setting(containerEl)
+            .setDesc("Sends known GPS and reverse-geocode metadata to AI descriptions and AI tags so location claims are based on real metadata instead of guesses from image style or filename.")
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.useGeolocationForAiTags && this.plugin.settings.useGeolocationForAiDescription)
+                .onChange(async value => {
+                    this.plugin.settings.useGeolocationForAiTags = value;
+                    this.plugin.settings.useGeolocationForAiDescription = value;
+                    await this.plugin.saveSettings();
+                    refreshSummary();
+                    this.animateInlineDependencyWarning(geolocationAiWarningHostEl!, renderGeolocationAiWarning);
+                })),
+            "Use geolocation as AI context",
+            this.getSettingsSectionIcon("geolocation")
+        );
+        geolocationAiWarningHostEl = containerEl.createDiv();
+        renderGeolocationAiWarning();
+
+        summaryHostEl = containerEl.createDiv();
+        refreshSummary();
+        return refreshSummary;
     }
 
     renderAiEnabledSettings(containerEl: HTMLElement): void {
         containerEl.empty();
-        if (!this.plugin.settings.aiTaggingEnabled) return;
         const aiBodyEl = this.createSettingsRevealContainer(containerEl);
         aiBodyEl.createEl("h4", { text: "AI Setup" });
 
         new Setting(aiBodyEl)
             .setName("Get Ollama")
-            .setDesc("Required for local AI tagging. Install Ollama before pulling or using local models.")
+            .setDesc("Required for local image analysis and AI tagging. Install Ollama before pulling or using local models.")
             .addButton(button => {
                 button
                     .setButtonText("Download Ollama")
                     .onClick(() => {
                         window.open("https://ollama.com/download");
                     });
-                button.buttonEl.addClass("bfm-autotag-success-button");
+                button.buttonEl.addClass("autotag-success-button");
             });
 
-        const modelSetting = new Setting(aiBodyEl)
-            .setName("Ollama Model")
-            .setDesc("Local model used for semantic enrichment.");
+        new Setting(aiBodyEl)
+            .setName("Enable Image Analysis")
+            .setDesc("Uses a local Ollama vision model to create the visual description that AI descriptions and AI tags can build on. Turn off to rely on filename, folder, geolocation, and Vault Awareness vocabulary only.")
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.imageAnalysisEnabled)
+                .onChange(async value => {
+                    this.plugin.settings.imageAnalysisEnabled = value;
+                    await this.plugin.saveSettings();
+                }));
 
-        let refreshModelDropdown: (() => Promise<void>) | null = null;
+        const visionModelSetting = new Setting(aiBodyEl)
+            .setName("Ollama Vision Model")
+            .setDesc("Local vision model used to read the image and create the initial description.");
 
-        modelSetting.addDropdown(dropdown => {
-            refreshModelDropdown = async () => {
+        let refreshVisionModelDropdown: (() => Promise<void>) | null = null;
+
+        visionModelSetting.addDropdown(dropdown => {
+            refreshVisionModelDropdown = async () => {
                 const pulledModels = await this.plugin.listPulledOllamaModels();
-                const pulledSet = new Set(pulledModels);
 
                 dropdown.selectEl.empty();
 
-                RECOMMENDED_TAGGING_MODELS.forEach(model => {
-                    const suffix = pulledSet.has(model.name) ? " [Pulled]" : "";
+                RECOMMENDED_VISION_MODELS.forEach(model => {
+                    const suffix = this.plugin.hasPulledOllamaModel(pulledModels, model.name) ? " [Pulled]" : "";
                     dropdown.addOption(model.name, `${model.label}${suffix}`);
                 });
 
                 pulledModels
-                    .filter(model => !RECOMMENDED_TAGGING_MODELS.some(recommended => recommended.name === model))
+                    .filter(model => !RECOMMENDED_VISION_MODELS.some(recommended => this.plugin.normalizeOllamaModelNameForCompare(recommended.name) === this.plugin.normalizeOllamaModelNameForCompare(model)))
                     .forEach(model => dropdown.addOption(model, `${model} [Pulled]`));
 
-                dropdown.setValue(this.plugin.settings.ollamaModel || "qwen3:8b");
+                const selectedModel = this.plugin.getOllamaVisionModel();
+                if (!Array.from(dropdown.selectEl.options).some(option => option.value === selectedModel)) {
+                    dropdown.addOption(selectedModel, `${selectedModel} [Custom]`);
+                }
+                dropdown.setValue(selectedModel);
             };
 
-            RECOMMENDED_TAGGING_MODELS.forEach(model => {
+            RECOMMENDED_VISION_MODELS.forEach(model => {
                 dropdown.addOption(model.name, model.label);
             });
 
             dropdown
-                .setValue(this.plugin.settings.ollamaModel || "qwen3:8b")
+                .setValue(this.plugin.getOllamaVisionModel())
                 .onChange(async (value) => {
-                    this.plugin.settings.ollamaModel = value;
+                    this.plugin.settings.ollamaVisionModel = value;
                     await this.plugin.saveSettings();
                 });
 
-            void refreshModelDropdown();
+            void refreshVisionModelDropdown();
         });
 
         new Setting(aiBodyEl)
-            .setName("Pull Selected Model")
-            .setDesc("Downloads the selected model with Ollama so it can be used locally. Ollama must be installed and running first.")
+            .setName("Pull Vision Model")
+            .setDesc("Downloads the selected vision model with Ollama so Image Analysis can run locally.")
             .addButton(button => {
                 button
                     .setButtonText("Pull Model")
                     .setCta()
                     .onClick(async () => {
-                        const modelName = this.plugin.settings.ollamaModel || "qwen3:8b";
+                        const modelName = this.plugin.getOllamaVisionModel();
                         button.setButtonText("Pulling...");
                         button.setDisabled(true);
 
@@ -10984,20 +14078,20 @@ class BfmAutotagSettingTab extends PluginSettingTab {
                         button.setButtonText("Pull Model");
 
                         if (pulled) {
-                            new Notice(`Pulled Ollama model: ${modelName}`);
-                            await refreshModelDropdown?.();
+                            new Notice(`Pulled Ollama vision model: ${modelName}`);
+                            await refreshVisionModelDropdown?.();
                         } else {
-                            new Notice("Could not pull model. Check that Ollama is installed and running.");
+                            new Notice("Could not pull vision model. Check that Ollama is installed and running.");
                         }
                     });
             });
 
         new Setting(aiBodyEl)
-            .setName("Remove Selected Model")
-            .setDesc("Deletes the selected model from local Ollama storage.")
+            .setName("Remove Selected Vision Model")
+            .setDesc("Deletes the selected vision model from local Ollama storage.")
             .addButton(button => {
                 const removeSelectedModel = async () => {
-                    const modelName = this.plugin.settings.ollamaModel || "qwen3:8b";
+                    const modelName = this.plugin.getOllamaVisionModel();
                     button.setButtonText("Removing...");
                     button.setDisabled(true);
 
@@ -11007,26 +14101,186 @@ class BfmAutotagSettingTab extends PluginSettingTab {
                     button.setButtonText("Remove Model");
 
                     if (removed) {
-                        new Notice(`Removed Ollama model: ${modelName}`);
-                        await refreshModelDropdown?.();
+                        new Notice(`Removed Ollama vision model: ${modelName}`);
+                        await refreshVisionModelDropdown?.();
                     } else {
-                        new Notice("Could not remove model. Check that Ollama is running and the model is pulled.");
+                        new Notice("Could not remove vision model. Check that Ollama is running and the model is pulled.");
                     }
                 };
 
                 button
                     .setButtonText("Remove Model")
                     .onClick(() => {
-                        const modelName = this.plugin.settings.ollamaModel || "qwen3:8b";
+                        const modelName = this.plugin.getOllamaVisionModel();
                         new ConfirmDestructiveActionModal(
                             this.app,
-                            "Remove selected Ollama model?",
+                            "Remove selected Ollama vision model?",
                             `This deletes '${modelName}' from local Ollama storage. It does not change existing notes.`,
                             "Remove Model",
                             removeSelectedModel
                         ).open();
                     });
-                button.buttonEl.addClass("bfm-autotag-danger-button");
+                button.buttonEl.addClass("autotag-danger-button");
+            });
+
+        new Setting(aiBodyEl)
+            .setName("Custom Vision Model")
+            .setDesc("Optional: type a local Ollama vision model name not listed above, for example a custom Modelfile name.")
+            .addText(text =>
+                text.setPlaceholder("my-vision-model")
+                    .setValue("")
+                    .onChange(async (value) => {
+                        const modelName = value.trim();
+                        if (modelName) {
+                            this.plugin.settings.ollamaVisionModel = modelName;
+                            await this.plugin.saveSettings();
+                            await refreshVisionModelDropdown?.();
+                        }
+                    }));
+
+        new Setting(aiBodyEl)
+            .setName("Image Description Prompt")
+            .setDesc("Prompt sent to the selected vision model before geolocation enhancement, human-readable cleanup, folder filtering, and AI tag generation run.")
+            .addTextArea(textArea => {
+                textArea.inputEl.rows = 5;
+                textArea.setPlaceholder(DEFAULT_OLLAMA_VISION_PROMPT)
+                    .setValue(this.plugin.getOllamaVisionPrompt())
+                    .onChange(async value => {
+                        this.plugin.settings.ollamaVisionPrompt = value.trim() || DEFAULT_OLLAMA_VISION_PROMPT;
+                        await this.plugin.saveSettings();
+                    });
+            })
+            .addButton(button => button
+                .setButtonText("Reset Prompt")
+                .onClick(async () => {
+                    this.plugin.settings.ollamaVisionPrompt = DEFAULT_OLLAMA_VISION_PROMPT;
+                    await this.plugin.saveSettings();
+                    this.refreshDisplayAnimated();
+                }));
+
+        new Setting(aiBodyEl)
+            .setName("Minimum AI description words")
+            .setDesc("Requested minimum length for the generated image description. Responses below this count trigger a stricter vision-model retry; if the model still stops early, Autotag keeps the longest factual response instead of discarding it.")
+            .addSlider(slider => slider
+                .setLimits(20, 500, 10)
+                .setValue(this.plugin.settings.aiDescriptionMinimumWords)
+                .setDynamicTooltip()
+                .onChange(async value => {
+                    this.plugin.settings.aiDescriptionMinimumWords = value;
+                    await this.plugin.saveSettings();
+                }))
+            .addButton(button => button
+                .setIcon("rotate-ccw")
+                .setTooltip("Reset to default")
+                .onClick(async () => {
+                    this.plugin.settings.aiDescriptionMinimumWords = DEFAULT_SETTINGS.aiDescriptionMinimumWords;
+                    await this.plugin.saveSettings();
+                    this.refreshDisplayAnimated();
+                }));
+
+        const modelSetting = new Setting(aiBodyEl)
+            .setName("Ollama Tag Model")
+            .setDesc("Local model used for semantic enrichment.");
+
+        let refreshModelDropdown: (() => Promise<void>) | null = null;
+
+        modelSetting.addDropdown(dropdown => {
+            refreshModelDropdown = async () => {
+                const pulledModels = await this.plugin.listPulledOllamaModels();
+
+                dropdown.selectEl.empty();
+
+                RECOMMENDED_TAGGING_MODELS.forEach(model => {
+                    const suffix = this.plugin.hasPulledOllamaModel(pulledModels, model.name) ? " [Pulled]" : "";
+                    dropdown.addOption(model.name, `${model.label}${suffix}`);
+                });
+
+                pulledModels
+                    .filter(model => !RECOMMENDED_TAGGING_MODELS.some(recommended => this.plugin.normalizeOllamaModelNameForCompare(recommended.name) === this.plugin.normalizeOllamaModelNameForCompare(model)))
+                    .forEach(model => dropdown.addOption(model, `${model} [Pulled]`));
+
+                const selectedModel = this.plugin.settings.ollamaModel || DEFAULT_SETTINGS.ollamaModel;
+                if (!Array.from(dropdown.selectEl.options).some(option => option.value === selectedModel)) {
+                    dropdown.addOption(selectedModel, `${selectedModel} [Custom]`);
+                }
+                dropdown.setValue(selectedModel);
+            };
+
+            RECOMMENDED_TAGGING_MODELS.forEach(model => {
+                dropdown.addOption(model.name, model.label);
+            });
+
+            dropdown
+                .setValue(this.plugin.settings.ollamaModel || DEFAULT_SETTINGS.ollamaModel)
+                .onChange(async (value) => {
+                    this.plugin.settings.ollamaModel = value;
+                    await this.plugin.saveSettings();
+                });
+
+            void refreshModelDropdown();
+        });
+
+        new Setting(aiBodyEl)
+            .setName("Pull Tag Model")
+            .setDesc("Downloads the selected tag model with Ollama so semantic enrichment can run locally.")
+            .addButton(button => {
+                button
+                    .setButtonText("Pull Model")
+                    .setCta()
+                    .onClick(async () => {
+                        const modelName = this.plugin.settings.ollamaModel || DEFAULT_SETTINGS.ollamaModel;
+                        button.setButtonText("Pulling...");
+                        button.setDisabled(true);
+
+                        const pulled = await this.plugin.pullOllamaModel(modelName);
+
+                        button.setDisabled(false);
+                        button.setButtonText("Pull Model");
+
+                        if (pulled) {
+                            new Notice(`Pulled Ollama tag model: ${modelName}`);
+                            await refreshModelDropdown?.();
+                        } else {
+                            new Notice("Could not pull tag model. Check that Ollama is installed and running.");
+                        }
+                    });
+            });
+
+        new Setting(aiBodyEl)
+            .setName("Remove Selected Tag Model")
+            .setDesc("Deletes the selected tag model from local Ollama storage.")
+            .addButton(button => {
+                const removeSelectedModel = async () => {
+                    const modelName = this.plugin.settings.ollamaModel || DEFAULT_SETTINGS.ollamaModel;
+                    button.setButtonText("Removing...");
+                    button.setDisabled(true);
+
+                    const removed = await this.plugin.removeOllamaModel(modelName);
+
+                    button.setDisabled(false);
+                    button.setButtonText("Remove Model");
+
+                    if (removed) {
+                        new Notice(`Removed Ollama tag model: ${modelName}`);
+                        await refreshModelDropdown?.();
+                    } else {
+                        new Notice("Could not remove tag model. Check that Ollama is running and the model is pulled.");
+                    }
+                };
+
+                button
+                    .setButtonText("Remove Model")
+                    .onClick(() => {
+                        const modelName = this.plugin.settings.ollamaModel || DEFAULT_SETTINGS.ollamaModel;
+                        new ConfirmDestructiveActionModal(
+                            this.app,
+                            "Remove selected Ollama tag model?",
+                            `This deletes '${modelName}' from local Ollama storage. It does not change existing notes.`,
+                            "Remove Model",
+                            removeSelectedModel
+                        ).open();
+                    });
+                button.buttonEl.addClass("autotag-danger-button");
             });
 
         new Setting(aiBodyEl)
@@ -11041,8 +14295,8 @@ class BfmAutotagSettingTab extends PluginSettingTab {
                     }));
 
         new Setting(aiBodyEl)
-            .setName("Custom Ollama Model")
-            .setDesc("Optional: type a model name not listed above, for example a custom Modelfile name.")
+            .setName("Custom Tag Model")
+            .setDesc("Optional: type a local Ollama tag model name not listed above, for example a custom Modelfile name.")
             .addText(text =>
                 text.setPlaceholder("my-custom-model")
                     .setValue("")
@@ -11051,6 +14305,7 @@ class BfmAutotagSettingTab extends PluginSettingTab {
                         if (modelName) {
                             this.plugin.settings.ollamaModel = modelName;
                             await this.plugin.saveSettings();
+                            await refreshModelDropdown?.();
                         }
                     }));
 
@@ -11072,8 +14327,9 @@ class BfmAutotagSettingTab extends PluginSettingTab {
                     }
                 }));
 
-        this.renderAiGeneratedPropertySettings(aiBodyEl);
-        this.renderAiCandidateModeSettings(aiBodyEl);
+        const refreshAiInputSummary = this.renderAiInputSettings(aiBodyEl);
+        this.renderAiDescriptionPropertySettings(aiBodyEl);
+        this.renderAiGeneratedPropertySettings(aiBodyEl, refreshAiInputSummary);
         this.wrapSubcategoryPanels(aiBodyEl);
         this.decorateSettingsHeadings(aiBodyEl);
         this.enhanceInfoDescriptionAnimations(aiBodyEl);
@@ -11083,9 +14339,9 @@ class BfmAutotagSettingTab extends PluginSettingTab {
         settingEls.forEach(settingEl => {
             const nameEl = settingEl.querySelector(".setting-item-name") as HTMLElement | null;
             const descriptionEl = settingEl.querySelector(".setting-item-description") as HTMLElement | null;
-            if (!nameEl || !descriptionEl || nameEl.querySelector(".bfm-autotag-info-trigger")) return;
+            if (!nameEl || !descriptionEl || nameEl.querySelector(".autotag-info-trigger")) return;
 
-            const infoEl = nameEl.createSpan({ cls: "bfm-autotag-info-trigger", text: "i" });
+            const infoEl = nameEl.createSpan({ cls: "autotag-info-trigger", text: "i" });
             let desiredOpen = false;
             let isAnimating = false;
             let isOpen = false;
@@ -11097,7 +14353,7 @@ class BfmAutotagSettingTab extends PluginSettingTab {
 
             const closeOtherDescriptions = () => {
                 const controllers = Array.from(this.containerEl.querySelectorAll(".setting-item"))
-                    .map(el => (el as any).__bfmAutotagInfoController)
+                    .map(el => (el as any).__autotagInfoController)
                     .filter(Boolean);
                 controllers.forEach(controller => {
                     if (controller.settingEl !== settingEl) controller.close();
@@ -11107,7 +14363,7 @@ class BfmAutotagSettingTab extends PluginSettingTab {
             const animateTo = (open: boolean) => {
                 if (isAnimating || isOpen === open) return;
                 isAnimating = true;
-                descriptionEl.addClass("bfm-autotag-info-managed");
+                descriptionEl.addClass("autotag-info-managed");
                 descriptionEl.style.overflow = "hidden";
                 descriptionEl.style.display = "block";
                 descriptionEl.style.maxHeight = open ? "0px" : `${descriptionEl.scrollHeight}px`;
@@ -11150,7 +14406,7 @@ class BfmAutotagSettingTab extends PluginSettingTab {
                 if (!isAnimating) animateTo(open);
             };
 
-            (settingEl as any).__bfmAutotagInfoController = {
+            (settingEl as any).__autotagInfoController = {
                 settingEl,
                 close: () => requestState(false),
             };
@@ -11238,16 +14494,16 @@ class BfmAutotagSettingTab extends PluginSettingTab {
     }
 
     display(): void {
-        this.plugin.buildVaultVocabularyCache();
+        this.plugin.scheduleVaultVocabularyCacheBuild();
         const { containerEl } = this;
         this.closeInfoDescriptions(containerEl);
         this.resetInfoScrollCloseHandlers();
         this.resetProcessingStatusTimer();
         this.resetHealthDashboardTimer();
         containerEl.empty();
-        containerEl.addClass("bfm-autotag-settings-tab");
+        containerEl.addClass("autotag-settings-tab");
 
-        containerEl.createEl('h2', { text: 'Maru\'s Autotag Settings' });
+        containerEl.createEl('h2', { text: 'Autotag Settings' });
         this.renderSettingsNavigation(containerEl);
         this.createSettingsAnchor(containerEl, "health", "Health");
         this.renderHealthCheckupSettings(containerEl);
@@ -11256,15 +14512,22 @@ class BfmAutotagSettingTab extends PluginSettingTab {
         this.renderHowItWorksPanel(
             containerEl,
             "How it works",
-            "Install the Binary File Manager plugin so it can create companion notes. Maru\'s Autotag then goes through every tag system and follows its instructions in the order shown here in the settings.",
-            true
+            "Choose a source folder and companion-note folder. Autotag creates or updates companion notes, then applies the enabled tag systems in the order shown here in the settings."
         );
         containerEl.createEl("h4", { text: "Path Setup" });
+        this.renderProblemWarningPanel(
+            containerEl,
+            "autotag-setup-path-warning",
+            "Setup path attention",
+            this.getSetupProblemWarningLines(),
+            "warning",
+            "Autotag needs the source and companion-note folders before processing can run reliably."
+        );
 
         // Base path
         new Setting(containerEl)
             .setName("Base Path for Watched Files")
-            .setDesc("Relative path inside the vault to watch for files. Notice: Empty Fallback to Default.")
+            .setDesc("Managed source folder for files Autotag should process. Notice: Empty Fallback to Default.")
             .addText(text => {
                 this.attachTextSuggestions(text.inputEl, this.getFolderPathSuggestions());
                 text.setPlaceholder(DEFAULT_SETTINGS.basePath)
@@ -11276,30 +14539,37 @@ class BfmAutotagSettingTab extends PluginSettingTab {
                     });
             });
 
-        // BFM new file location
+        new Setting(containerEl)
+            .setName("Move outside files into Base Path")
+            .setDesc("When a supported non-markdown file is added outside the managed source folder, move it into the Base Path before processing. Files already inside the Base Path, companion notes, hidden folders, and node_modules are left alone.")
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.moveOutsideFilesToBasePath)
+                .onChange(async value => {
+                    this.plugin.settings.moveOutsideFilesToBasePath = value;
+                    await this.plugin.saveSettings();
+                }));
 
         new Setting(containerEl)
-            .setName("BFM New File Location")
-            .setDesc("Where BFM creates the note corresponding to the watched file. Notice: Empty Fallback to Default.")
+            .setName("Companion Note Folder")
+            .setDesc("Folder where Autotag creates and looks for companion notes. Notice: Empty fallback to default.")
             .addText(text => {
                 this.attachTextSuggestions(text.inputEl, this.getFolderPathSuggestions());
-                text.setPlaceholder(DEFAULT_SETTINGS.bfmNewFileLocation)
-                    .setValue(this.plugin.settings.bfmNewFileLocation)
-                    .onChange(async (value) => {
-                        this.plugin.settings.bfmNewFileLocation = value.trim() || DEFAULT_SETTINGS.bfmNewFileLocation;
+                text.setPlaceholder(DEFAULT_SETTINGS.companionNoteFolder)
+                    .setValue(this.plugin.settings.companionNoteFolder)
+                    .onChange(async value => {
+                        this.plugin.settings.companionNoteFolder = this.plugin.normalizeVaultFolderPath(value) || DEFAULT_SETTINGS.companionNoteFolder;
                         await this.plugin.saveSettings();
-                        //new Notice("Updated BFM folder location.");
                     });
             });
 
         new Setting(containerEl)
-            .setName("BFM File name format")
-            .setDesc("Use the same metadata filename format as Binary File Manager. Supported: {{NAME}}, {{FULLNAME}}, {{EXTENSION}}, {{PATH}}, {{LINK}}, {{EMBED}}, plus :UP and :LOW. Tip: for dates as properties, use created/last modified properties with a linter plugin. Notice: Empty Fallback to Default.")
+            .setName("Companion Note Name Format")
+            .setDesc("Format for generated companion note names. Supported tokens: {{name}} name without extension, {{filename}} name with extension, {{extension}}, {{path}}, {{link}}, and {{embed}}. Casing only changes name, filename, and extension tokens: uppercase tokens like {{NAME}} write uppercase, title-style tokens like {{Name}} keep the original upper/lowercase text, and lowercase tokens write lowercase. Path, link, and embed tokens always keep the real vault path casing so links stay valid.")
             .addText(text => text
-                .setPlaceholder(DEFAULT_SETTINGS.bfmFileNameFormat)
-                .setValue(this.plugin.settings.bfmFileNameFormat)
+                .setPlaceholder(DEFAULT_SETTINGS.companionNoteNameFormat)
+                .setValue(this.plugin.settings.companionNoteNameFormat)
                 .onChange(async value => {
-                    this.plugin.settings.bfmFileNameFormat = value.trim() || DEFAULT_SETTINGS.bfmFileNameFormat;
+                    this.plugin.settings.companionNoteNameFormat = value.trim() || DEFAULT_SETTINGS.companionNoteNameFormat;
                     await this.plugin.saveSettings();
                 }));
 
@@ -11320,7 +14590,7 @@ class BfmAutotagSettingTab extends PluginSettingTab {
         };
         containerEl.createEl("h4", { text: "Plugin Properties" });
 
-        new Setting(containerEl)
+        const linkToFilePropertySetting = new Setting(containerEl)
             .setName("Link to file property name")
             .setDesc("Property used for the link to the original image file. Notice: Empty Fallback to Default.")
             .addToggle(toggle => toggle
@@ -11340,8 +14610,9 @@ class BfmAutotagSettingTab extends PluginSettingTab {
                         refreshGeneratedMarkdownPreview();
                     });
             });
+        linkToFilePropertySetting.settingEl.id = "autotag-property-link-to-file";
 
-        new Setting(containerEl)
+        const fileTypePropertySetting = new Setting(containerEl)
             .setName("File type property name")
             .setDesc("Property used for the source file extension. Notice: Empty Fallback to Default.")
             .addToggle(toggle => toggle
@@ -11361,8 +14632,9 @@ class BfmAutotagSettingTab extends PluginSettingTab {
                         refreshGeneratedMarkdownPreview();
                     });
             });
+        fileTypePropertySetting.settingEl.id = "autotag-property-file-type";
 
-        new Setting(containerEl)
+        const embedPropertySetting = new Setting(containerEl)
             .setName("Embed property name")
             .setDesc("Property used for the embedded source file link. Notice: Empty Fallback to Default.")
             .addToggle(toggle => toggle
@@ -11382,82 +14654,7 @@ class BfmAutotagSettingTab extends PluginSettingTab {
                         refreshGeneratedMarkdownPreview();
                     });
             });
-
-        new Setting(containerEl)
-            .setName("Tags generated by AI")
-            .setDesc("Property used for AI-generated tags. Notice: Empty Fallback to Default.")
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.aiTagsPropertyEnabled)
-                .onChange(async value => {
-                    this.plugin.settings.aiTagsPropertyEnabled = value;
-                    await this.plugin.saveSettings();
-                    this.refreshDisplayAnimated();
-                }))
-            .addText(text => {
-                this.attachTextSuggestions(text.inputEl, this.getPropertyNameSuggestions());
-                text.setPlaceholder(DEFAULT_SETTINGS.aiTagsPropertyName)
-                    .setValue(this.plugin.settings.aiTagsPropertyName)
-                    .onChange(async value => {
-                        this.plugin.settings.aiTagsPropertyName = this.plugin.normalizePropertyName(value, DEFAULT_SETTINGS.aiTagsPropertyName);
-                        await this.plugin.saveSettings();
-                        if (this.plugin.settings.aiTagsUseAsVaultCandidate) this.plugin.buildVaultVocabularyCache();
-                        refreshTemplatePropertySuggestions();
-                        refreshGeneratedMarkdownPreview();
-                    });
-            });
-
-        new Setting(containerEl)
-            .setName("Use as Vault Awareness Candidates")
-            .setDesc("Allows values written to the AI tags property to become known vocabulary for Vault Awareness.")
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.aiTagsUseAsVaultCandidate)
-                .onChange(async value => {
-                    this.plugin.settings.aiTagsUseAsVaultCandidate = value;
-                    await this.plugin.saveSettings();
-                    this.plugin.buildVaultVocabularyCache();
-                }));
-
-
-        const aiTagsFormatSetting = new Setting(containerEl)
-            .setName("AI tag format")
-            .setDesc("Controls how each generated AI tag is written into the YAML list.");
-        const aiTagsFormatPreview = aiTagsFormatSetting.controlEl.createDiv();
-        const refreshAiTagsFormatPreview = () => {
-            this.renderFormatPreview(aiTagsFormatPreview, "Preview", this.plugin.settings.aiTagsFormat, "info");
-        };
-        refreshAiTagsFormatPreview();
-        aiTagsFormatSetting.addText(text => text
-            .setPlaceholder("[[example]]")
-            .setValue(this.plugin.settings.aiTagsFormat)
-            .onChange(async value => {
-                this.plugin.settings.aiTagsFormat = value;
-                refreshAiTagsFormatPreview();
-                await this.plugin.saveSettings();
-                refreshGeneratedMarkdownPreview();
-            }));
-
-        new Setting(containerEl)
-            .setName("Description generated by AI")
-            .setDesc("Property used for the AI-generated image description. Notice: Empty Fallback to Default.")
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.aiDescriptionPropertyEnabled)
-                .onChange(async value => {
-                    this.plugin.settings.aiDescriptionPropertyEnabled = value;
-                    await this.plugin.saveSettings();
-                    this.refreshDisplayAnimated();
-                }))
-            .addText(text => {
-                this.attachTextSuggestions(text.inputEl, this.getPropertyNameSuggestions());
-                text.setPlaceholder(DEFAULT_SETTINGS.aiDescriptionPropertyName)
-                    .setValue(this.plugin.settings.aiDescriptionPropertyName)
-                    .onChange(async value => {
-                        this.plugin.settings.aiDescriptionPropertyName = this.plugin.normalizePropertyName(value, DEFAULT_SETTINGS.aiDescriptionPropertyName);
-                        await this.plugin.saveSettings();
-                        refreshTemplatePropertySuggestions();
-                        refreshGeneratedMarkdownPreview();
-                    });
-            });
-
+        embedPropertySetting.settingEl.id = "autotag-property-embed";
 
         const detectedProperties = this.getDetectedFrontmatterProperties();
 
@@ -11469,7 +14666,7 @@ class BfmAutotagSettingTab extends PluginSettingTab {
             this.renderHowItWorksPanel(
                 folderTagsHowHostEl,
                 "How Folder Tags work",
-                "Dropping a file into the Base Path adds properties based on Folder Properties, with tags based on subfolder names. Example: a file inside Anime/Character can write Anime and Character. Folder Tags may also be used as candidates for AI Tags to generate more nuanced and varied AI tags."
+                "Dropping a file into the Base Path adds properties based on Folder Properties, with tags based on subfolder names. Example: a file inside Anime/Character can write Anime and Character. Each Folder Property can also choose how its values influence AI Tags."
             );
         };
         renderFolderTagsHow();
@@ -11499,28 +14696,22 @@ class BfmAutotagSettingTab extends PluginSettingTab {
             this.renderFolderPropertyLists(folderTagsBodyEl, detectedProperties);
 
             folderTagsBodyEl.createEl("h4", { text: "Fallback" });
-            const fallbackPanelEl = folderTagsBodyEl.createDiv({ cls: "bfm-autotag-property-panel" });
+            const fallbackPanelEl = folderTagsBodyEl.createDiv({ cls: "autotag-property-panel" });
             fallbackPanelEl.createEl("h5", { text: "Folder Fallback" });
-            new Setting(fallbackPanelEl)
+            const fallbackPropertySetting = new Setting(fallbackPanelEl)
                 .setName("Folder Fallback Property")
-                .setDesc("Where folder names go when they are not listed above as domains or types. The dropdown is built from frontmatter properties already found in the vault. Default autotag-fallback keeps new installs neutral until the user chooses their own property. Notice: Empty Fallback to Default.")
-                .addDropdown(dropdown => {
-                    Array.from(new Set([...detectedProperties, this.plugin.settings.folderFallbackProperty]))
-                        .filter(Boolean)
-                        .sort((a, b) => a.localeCompare(b))
-                        .forEach(property => dropdown.addOption(property, property));
-                    dropdown
+                .setDesc("Where folder names go when they are not listed above. Type any property name or choose a searchable suggestion from the active template, detected vault properties, and plugin properties. Notice: Empty Fallback to Default.")
+                .addText(text => {
+                    this.attachTextSuggestions(text.inputEl, this.getPropertyNameSuggestions(detectedProperties));
+                    text.setPlaceholder(DEFAULT_SETTINGS.folderFallbackProperty)
                         .setValue(this.plugin.settings.folderFallbackProperty)
-                        .onChange(async (value) => {
+                        .onChange(async value => {
                             this.plugin.settings.folderFallbackProperty = this.plugin.normalizeFolderFallbackProperty(value);
                             await this.plugin.saveSettings();
-                            if (this.plugin.settings.folderFallbackUseAsVaultCandidate) this.plugin.buildVaultVocabularyCache();
+                            if (this.plugin.settings.folderFallbackUseAsVaultCandidate) this.plugin.scheduleVaultVocabularyCacheBuild();
                         });
-                })
-                .addButton(button => button
-                    .setButtonText("Refresh")
-                    .setTooltip("Refresh detected properties")
-                    .onClick(() => this.refreshDisplayAnimated()));
+                });
+            fallbackPropertySetting.settingEl.id = "autotag-folder-fallback-property";
 
             const fallbackFormatSetting = new Setting(fallbackPanelEl)
                 .setName("Folder fallback format")
@@ -11539,26 +14730,69 @@ class BfmAutotagSettingTab extends PluginSettingTab {
                     await this.plugin.saveSettings();
                 }));
 
-            new Setting(fallbackPanelEl)
-                .setName("Use fallback as AI candidates")
-                .setDesc("Allows unmatched folder names written to the fallback property to be used by Folder Tags Candidate Mode.")
-                .addToggle(toggle => toggle
-                    .setValue(this.plugin.settings.folderFallbackUseAsAiCandidate)
-                    .onChange(async value => {
-                        this.plugin.settings.folderFallbackUseAsAiCandidate = value;
+            let fallbackAiWarningHostEl: HTMLElement | null = null;
+            const renderFallbackAiWarning = () => {
+                if (!fallbackAiWarningHostEl) return;
+                fallbackAiWarningHostEl.empty();
+                const mode = this.plugin.getFolderFallbackAiCandidateMode();
+                this.renderInlineDependencyWarning(
+                    fallbackAiWarningHostEl,
+                    "AI Tagging is off",
+                    this.plugin.isCandidateSourceActive(mode) && !this.plugin.settings.aiTaggingEnabled
+                        ? ["The folder fallback is set to feed AI Tags, but AI Tagging is currently disabled. Enable AI Tags or set this mode to Disabled."]
+                        : [],
+                    this.getSettingsSectionIcon("ai-tags")
+                );
+            };
+            this.setSettingNameWithIcon(
+                this.addCandidateModeDropdown(
+                    new Setting(fallbackPanelEl)
+                        .setDesc("Controls how unmatched folder names written to the fallback property can influence AI Tags. All Keywords lets the value act as metadata evidence, Consider uses it only as a weak clue, Exclude keeps exact fallback values out of AI Tags, and Disabled ignores it for AI."),
+                    this.plugin.getFolderFallbackAiCandidateMode(),
+                    async value => {
+                        this.plugin.settings.folderFallbackAiCandidateMode = value;
+                        this.plugin.settings.folderFallbackUseAsAiCandidate = this.plugin.isCandidateSourceActive(value);
                         await this.plugin.saveSettings();
-                    }));
+                        this.animateInlineDependencyWarning(fallbackAiWarningHostEl!, renderFallbackAiWarning);
+                    }
+                ),
+                "Fallback AI candidate mode",
+                this.getSettingsSectionIcon("ai-tags")
+            );
+            fallbackAiWarningHostEl = fallbackPanelEl.createDiv();
+            renderFallbackAiWarning();
 
-            new Setting(fallbackPanelEl)
-                .setName("Use as Vault Awareness Candidates")
-                .setDesc("Allows values written to the fallback property to become known vocabulary for Vault Awareness.")
-                .addToggle(toggle => toggle
-                    .setValue(this.plugin.settings.folderFallbackUseAsVaultCandidate)
-                    .onChange(async value => {
-                        this.plugin.settings.folderFallbackUseAsVaultCandidate = value;
-                        await this.plugin.saveSettings();
-                        this.plugin.buildVaultVocabularyCache();
-                    }));
+            let fallbackVaultWarningHostEl: HTMLElement | null = null;
+            const renderFallbackVaultWarning = () => {
+                if (!fallbackVaultWarningHostEl) return;
+                fallbackVaultWarningHostEl.empty();
+                this.renderInlineDependencyWarning(
+                    fallbackVaultWarningHostEl,
+                    "Advanced vocabulary source",
+                    this.getVaultVocabularyAdvancedWarningLines(
+                        this.plugin.settings.folderFallbackUseAsVaultCandidate,
+                        this.plugin.settings.vaultAwarenessEnabled,
+                        "fallback"
+                    ),
+                    this.getSettingsSectionIcon("vault-awareness")
+                );
+            };
+            fallbackVaultWarningHostEl = fallbackPanelEl.createDiv();
+            renderFallbackVaultWarning();
+            this.setSettingNameWithIcon(
+                new Setting(fallbackPanelEl)
+                    .setDesc("Scans the fallback property across the whole vault. Every existing frontmatter value found there can become known vocabulary for Vault Awareness, not only values from the file currently being processed.")
+                    .addToggle(toggle => toggle
+                        .setValue(this.plugin.settings.folderFallbackUseAsVaultCandidate)
+                        .onChange(async value => {
+                            this.plugin.settings.folderFallbackUseAsVaultCandidate = value;
+                            await this.plugin.saveSettings();
+                            this.plugin.scheduleVaultVocabularyCacheBuild();
+                            this.animateInlineDependencyWarning(fallbackVaultWarningHostEl!, renderFallbackVaultWarning);
+                        })),
+                "Use property as Vault Awareness vocabulary",
+                this.getSettingsSectionIcon("vault-awareness")
+            );
 
             fallbackPanelEl.createEl("p", {
                 text: "Fallback values are written as a YAML list. To rename this property later across many generated notes, use Obsidian's Properties view rename feature, or search for 'autotag-fallback:' and replace it with your chosen property name.",
@@ -11570,10 +14804,10 @@ class BfmAutotagSettingTab extends PluginSettingTab {
         containerEl.createEl("h4", { text: "Frontmatter" });
         new Setting(containerEl)
             .setName("Template Source")
-            .setDesc("Choose whether Maru\'s Autotag builds the companion note from its own template or enriches a note created by BFM Templater. Note: even when Autotag Internal Template is selected, Binary File Manager may still use Templater before Autotag replaces the note content later in processing.")
+            .setDesc("Choose whether Autotag builds companion notes from the internal template or reads a vault template file. Generated properties overwrite their template values, while other template fields and body text are preserved.")
             .addDropdown(dropdown => dropdown
-                .addOption("internal", "Use Autotag Internal Template")
-                .addOption("bfm-templater", "Use BFM Templater Integration")
+                .addOption("internal", "Use Internal Template")
+                .addOption("template-file", "Use Template File")
                 .setValue(this.plugin.settings.templateSource)
                 .onChange(async value => {
                     this.plugin.settings.templateSource = value as TemplateSource;
@@ -11590,8 +14824,9 @@ class BfmAutotagSettingTab extends PluginSettingTab {
             if (this.plugin.settings.templateSource === "internal") {
                 const frontmatterTemplateSetting = new Setting(templateSourceHostEl)
                     .setName("Frontmatter Template")
-                    .setDesc("Paste a valid frontmatter template from one of your notes. Generated properties such as linktofile, filetype, embed, aitags, and aidescription overwrite their template values. Property-list values and extra template properties are additive/preserved, so examples like types: with - Ata or tags: with - excalidraw can stay in the template.");
-                templatePropertySuggestionHostEl = frontmatterTemplateSetting.infoEl.createDiv({ cls: "bfm-autotag-template-suggestion-host" });
+                    .setDesc("Paste a valid frontmatter template from one of your notes. Generated properties such as link-to-file, file type, embed, AI tags, and the AI description property overwrite their template values. Property-list values and extra template properties are additive/preserved, so examples like types: with - Ata or tags: with - excalidraw can stay in the template.");
+                frontmatterTemplateSetting.settingEl.addClass("autotag-frontmatter-template-setting");
+                templatePropertySuggestionHostEl = frontmatterTemplateSetting.infoEl.createDiv({ cls: "autotag-template-suggestion-host" });
                 this.renderTemplatePropertySuggestionBox(templatePropertySuggestionHostEl);
                 frontmatterTemplateSetting.addTextArea(textArea => {
                     textArea.inputEl.rows = 12;
@@ -11610,11 +14845,34 @@ class BfmAutotagSettingTab extends PluginSettingTab {
                     cls: "setting-item-description",
                 });
             } else {
-                templateSourceHostEl.createEl("p", {
-                    text: "BFM Templater mode expects Binary File Manager to create the companion note from its own template first. In BFM settings, enable its Templater integration and set the template file location there. Maru\'s Autotag then reads the created note, overwrites generated properties, adds property-list values, and preserves the rest.",
+                let templateStatusEl: HTMLElement;
+                const refreshTemplateStatus = () => {
+                    const templatePath = this.plugin.getTemplateFilePath();
+                    const unavailableMessage = this.plugin.getTemplateFileUnavailableMessage();
+                    templateStatusEl.setText(unavailableMessage
+                        ? `${unavailableMessage} Template checks and the generated preview are unavailable until you choose an existing Markdown template.`
+                        : `Template check uses: ${templatePath}`);
+                };
+                new Setting(templateSourceHostEl)
+                    .setName("Template File Path")
+                    .setDesc("Vault-relative Markdown file used as the base companion-note template. Autotag reads its frontmatter for checks, preserves non-generated fields, and keeps body text.")
+                    .addText(text => {
+                        this.attachTextSuggestions(text.inputEl, this.app.vault.getMarkdownFiles().map(file => file.path));
+                        text.setPlaceholder("Tools/Templates/Companion.md")
+                            .setValue(this.plugin.settings.templateFilePath)
+                            .onChange(async value => {
+                                this.plugin.settings.templateFilePath = this.plugin.normalizeVaultPath(value);
+                                await this.plugin.saveSettings();
+                                refreshTemplateStatus();
+                                refreshTemplatePropertySuggestions();
+                                refreshGeneratedMarkdownPreview();
+                            });
+                    });
+                templateStatusEl = templateSourceHostEl.createEl("p", {
                     cls: "setting-item-description",
                 });
-                templatePropertySuggestionHostEl = templateSourceHostEl.createDiv({ cls: "bfm-autotag-template-suggestion-host" });
+                refreshTemplateStatus();
+                templatePropertySuggestionHostEl = templateSourceHostEl.createDiv({ cls: "autotag-template-suggestion-host" });
                 this.renderTemplatePropertySuggestionBox(templatePropertySuggestionHostEl);
             }
             this.enhanceInfoDescriptionAnimations(templateSourceHostEl);
@@ -11622,7 +14880,11 @@ class BfmAutotagSettingTab extends PluginSettingTab {
         renderTemplateSourceSettings();
         this.forceSettingsBodyOpen(templateSourceHostEl);
 
-        new Setting(containerEl)
+        generatedMarkdownPreviewHostEl = containerEl.createDiv();
+        this.renderGeneratedMarkdownPreview(generatedMarkdownPreviewHostEl);
+
+        const generatedMarkdownPreviewRefs = this.getGeneratedMarkdownPreviewRefs(generatedMarkdownPreviewHostEl);
+        new Setting(generatedMarkdownPreviewRefs.embedSettingHostEl)
             .setName("Paste image embed into note body")
             .setDesc("Adds the image embed below the frontmatter as ![[image]].")
             .addToggle(toggle => toggle
@@ -11633,14 +14895,51 @@ class BfmAutotagSettingTab extends PluginSettingTab {
                     refreshGeneratedMarkdownPreview();
                 }));
 
-        generatedMarkdownPreviewHostEl = containerEl.createDiv();
-        this.renderGeneratedMarkdownPreview(generatedMarkdownPreviewHostEl);
-
         this.renderGeolocationSettings(containerEl);
 
         this.createSettingsAnchor(containerEl, 'processing', 'Processing & Queue');
 
         containerEl.createEl("h4", { text: "Processing Setup" });
+
+        new Setting(containerEl)
+            .setName("Companion note creation retries")
+            .setDesc("Extra attempts after the first companion-note creation attempt if Obsidian does not confirm the note exists. The wait before each retry follows the First retry wait schedule below.")
+            .addSlider(slider => slider
+                .setLimits(0, 5, 1)
+                .setValue(this.plugin.settings.companionNoteCreationRetries)
+                .setDynamicTooltip()
+                .onChange(async (value) => {
+                    this.plugin.settings.companionNoteCreationRetries = value;
+                    await this.plugin.saveSettings();
+                }))
+            .addButton(button => button
+                .setIcon("rotate-ccw")
+                .setTooltip("Reset to default")
+                .onClick(async () => {
+                    this.plugin.settings.companionNoteCreationRetries = DEFAULT_SETTINGS.companionNoteCreationRetries;
+                    await this.plugin.saveSettings();
+                    this.refreshDisplayAnimated();
+                }));
+
+        new Setting(containerEl)
+            .setName("First retry wait")
+            .setDesc("Seconds to wait before the first retry. Every subsequent retry adds 100% of this original interval: with a 2-second wait, three retries run after 2, 4, and 6 seconds. Applies to companion-note creation and complete file-processing retries.")
+            .addSlider(slider => slider
+                .setLimits(1, 30, 1)
+                .setValue(this.plugin.settings.retryInitialWaitSeconds)
+                .setDynamicTooltip()
+                .onChange(async (value) => {
+                    this.plugin.settings.retryInitialWaitSeconds = value;
+                    await this.plugin.saveSettings();
+                }))
+            .addButton(button => button
+                .setIcon("rotate-ccw")
+                .setTooltip("Reset to default")
+                .onClick(async () => {
+                    this.plugin.settings.retryInitialWaitSeconds = DEFAULT_SETTINGS.retryInitialWaitSeconds;
+                    await this.plugin.saveSettings();
+                    this.refreshDisplayAnimated();
+                }));
 
         new Setting(containerEl)
             .setName("Parallel workers")
@@ -11658,26 +14957,6 @@ class BfmAutotagSettingTab extends PluginSettingTab {
                 .setTooltip("Reset to default")
                 .onClick(async () => {
                     this.plugin.settings.parallelWorkers = DEFAULT_SETTINGS.parallelWorkers;
-                    await this.plugin.saveSettings();
-                    this.refreshDisplayAnimated();
-                }));
-
-        new Setting(containerEl)
-            .setName("BFM note max wait")
-            .setDesc("Maximum seconds to wait for Binary File Manager to create the companion note before processing.")
-            .addSlider(slider => slider
-                .setLimits(1, 30, 1)
-                .setValue(Math.round(this.plugin.settings.bfmNoteMaxWaitMs / 1000))
-                .setDynamicTooltip()
-                .onChange(async (value) => {
-                    this.plugin.settings.bfmNoteMaxWaitMs = value * 1000;
-                    await this.plugin.saveSettings();
-                }))
-            .addButton(button => button
-                .setIcon("rotate-ccw")
-                .setTooltip("Reset to default")
-                .onClick(async () => {
-                    this.plugin.settings.bfmNoteMaxWaitMs = DEFAULT_SETTINGS.bfmNoteMaxWaitMs;
                     await this.plugin.saveSettings();
                     this.refreshDisplayAnimated();
                 }));
@@ -11818,33 +15097,6 @@ class BfmAutotagSettingTab extends PluginSettingTab {
         renderDuplicateModeSettings();
         if (this.plugin.settings.duplicateDetectionMode !== "off") this.forceSettingsBodyOpen(duplicateModeHostEl);
 
-        new Setting(containerEl)
-            .setName("Filename Candidate Mode")
-            .setDesc("Controls whether words from the image file name are used for AI tags.")
-            .addDropdown(dropdown => dropdown
-                .addOption("disabled", "Disabled")
-                .addOption("consider", "Consider")
-                .addOption("all", "All Keywords")
-                .addOption("exclude", "Exclude")
-                .setValue(this.plugin.settings.filenameCandidateMode)
-                .onChange(async (value) => {
-                    this.plugin.settings.filenameCandidateMode = value as CandidateMode;
-                    await this.plugin.saveSettings();
-                }));
-        new Setting(containerEl)
-            .setName("Folder Tags Candidate Mode")
-            .setDesc("Controls whether enabled folder-derived keywords are used for AI tags. Exclude prevents current folder-derived terms from being written to aitags, even if they appear through another route.")
-            .addDropdown(dropdown => dropdown
-                .addOption("disabled", "Disabled")
-                .addOption("consider", "Consider")
-                .addOption("all", "All Keywords")
-                .addOption("exclude", "Exclude")
-                .setValue(this.plugin.settings.folderTagsCandidateMode)
-                .onChange(async (value) => {
-                    this.plugin.settings.folderTagsCandidateMode = value as CandidateMode;
-                    await this.plugin.saveSettings();
-                }));
-
         this.createSettingsAnchor(containerEl, 'vault-awareness', 'Vault Awareness');
         const vaultHowHostEl = containerEl.createDiv();
         const renderVaultHow = () => {
@@ -11853,19 +15105,31 @@ class BfmAutotagSettingTab extends PluginSettingTab {
             this.renderHowItWorksPanel(
                 vaultHowHostEl,
                 "How Vault Awareness works",
-                "When enabled, Autotag scans configured frontmatter properties for known concepts and lets Ollama add fitting existing vault vocabulary after the base AI tags. This keeps personal vocabulary available without forcing unrelated terms."
+                "When enabled, Autotag scans configured frontmatter properties before AI tagging so known vault vocabulary is available, then runs after base AI tagging to select fitting existing concepts. In the current pipeline, Vault Awareness can also shape wording through canonical vault names before its final output is routed."
             );
         };
         renderVaultHow();
 
-        new Setting(containerEl)
-            .setName("Enable Vault Awareness")
-            .setDesc("Adds a second Ollama pass that may select fitting known concepts from your configured vault vocabulary.")
+        let vaultToggleWarningHostEl: HTMLElement | null = null;
+        const renderVaultToggleWarning = () => {
+            if (!vaultToggleWarningHostEl) return;
+            vaultToggleWarningHostEl.empty();
+            this.renderInlineDependencyWarning(
+                vaultToggleWarningHostEl,
+                "AI Tagging is off",
+                this.getVaultAwarenessProblemWarningLines(),
+                this.getSettingsSectionIcon("ai-tags")
+            );
+        };
+        this.setSettingNameWithIcon(
+            new Setting(containerEl)
+            .setDesc("Uses known vault vocabulary before and after AI Tagging: first as a prepared vocabulary/canonicalization source, then as an extra Ollama pass that selects fitting existing concepts. Requires AI Tagging via Ollama.")
             .addToggle(toggle => toggle
                 .setValue(this.plugin.settings.vaultAwarenessEnabled)
                 .onChange(async (value) => {
                     this.plugin.settings.vaultAwarenessEnabled = value;
                     await this.plugin.saveSettings();
+                    this.plugin.scheduleVaultVocabularyCacheBuild();
                     if (value) {
                         this.animateSettingsCollapseThenRender(vaultHowHostEl, renderVaultHow);
                         this.animateSettingsContent(vaultHostEl, renderVaultEnabled);
@@ -11873,7 +15137,13 @@ class BfmAutotagSettingTab extends PluginSettingTab {
                         this.animateSettingsContent(vaultHowHostEl, renderVaultHow);
                         this.animateSettingsCollapseThenRender(vaultHostEl, renderVaultEnabled);
                     }
-                }));
+                    this.animateInlineDependencyWarning(vaultToggleWarningHostEl!, renderVaultToggleWarning);
+                })),
+            "Enable Vault Awareness",
+            this.getSettingsSectionIcon("ai-tags")
+        );
+        vaultToggleWarningHostEl = containerEl.createDiv();
+        renderVaultToggleWarning();
 
         const vaultHostEl = containerEl.createDiv();
         const renderVaultEnabled = () => {
@@ -11941,8 +15211,8 @@ class BfmAutotagSettingTab extends PluginSettingTab {
                     }));
 
             vaultBodyEl.createEl("h4", { text: "Vault Awareness Candidates" });
-            const candidatePanelEl = vaultBodyEl.createDiv({ cls: "bfm-autotag-property-panel bfm-autotag-vault-candidates-panel" });
-            candidatePanelEl.createEl("h5", { text: "Candidate Sources" });
+            const candidatePanelEl = vaultBodyEl.createDiv({ cls: "autotag-property-panel autotag-vault-candidates-panel" });
+            candidatePanelEl.createEl("h5", { text: "Vocabulary Sources" });
             new Setting(candidatePanelEl)
                 .setName("Excluded Candidate Terms")
                 .setDesc("Terms that should never be sent as vault vocabulary candidates, comma separated.")
@@ -11955,27 +15225,108 @@ class BfmAutotagSettingTab extends PluginSettingTab {
                             .map(term => term.trim())
                             .filter(Boolean);
                         await this.plugin.saveSettings();
-                        this.plugin.buildVaultVocabularyCache();
+                        this.plugin.scheduleVaultVocabularyCacheBuild();
                     });
                 });
 
             const candidateProperties = this.plugin.getVaultAwarenessCandidateProperties();
             candidatePanelEl.createEl("p", {
                 text: candidateProperties.length > 0
-                    ? "Properties currently used as Vault Awareness vocabulary sources:"
-                    : "No properties are currently used as Vault Awareness vocabulary sources. Enable the Vault Awareness candidate toggles under Folder Tags or Tags generated by AI.",
+                    ? "Properties currently scanned across the whole vault as Vault Awareness vocabulary sources. All existing frontmatter values in these properties can become candidates:"
+                    : "No properties are currently used as Vault Awareness vocabulary sources. Enable the Vault Awareness vocabulary toggles under Folder Tags or Tags generated by AI to scan those properties across the whole vault.",
                 cls: "setting-item-description",
             });
-            const candidateListEl = candidatePanelEl.createDiv({ cls: "bfm-autotag-vault-candidate-list" });
+            const candidateListEl = candidatePanelEl.createDiv({ cls: "autotag-vault-candidate-list" });
             candidateProperties.forEach(property => {
-                candidateListEl.createSpan({ text: property, cls: "bfm-autotag-vault-candidate-chip" });
+                candidateListEl.createSpan({ text: property, cls: "autotag-vault-candidate-chip" });
             });
             if (this.plugin.settings.bridgeEnabled && this.plugin.settings.bridgeUsePreBridgeVaultAwarenessOutput) {
-                candidateListEl.createSpan({ text: "Setting: Pre-Bridge", cls: "bfm-autotag-vault-candidate-chip bfm-autotag-vault-candidate-chip-setting" });
+                candidateListEl.createSpan({ text: "Setting: Pre-Bridge", cls: "autotag-vault-candidate-chip autotag-vault-candidate-chip-setting" });
             }
 
+            candidatePanelEl.createEl("h5", { text: "Learned Relationships" });
+            let renderLearnedRelationships: () => void = () => undefined;
+            new Setting(candidatePanelEl)
+                .setName("Relationship cache size limit")
+                .setDesc("Maximum vault-local Ollama recognitions retained for reuse. Older, less recently used relationships are removed first. Learned data is not copied through setup profiles.")
+                .addSlider(slider => slider
+                    .setLimits(50, 5000, 50)
+                    .setValue(this.plugin.settings.learnedVaultRelationCacheLimit)
+                    .setDynamicTooltip()
+                    .onChange(async value => {
+                        this.plugin.settings.learnedVaultRelationCacheLimit = value;
+                        this.plugin.settings.learnedVaultRelations = this.plugin.settings.learnedVaultRelations
+                            .sort((a, b) => Math.max(b.lastUsedAt, b.lastConfirmedAt) - Math.max(a.lastUsedAt, a.lastConfirmedAt))
+                            .slice(0, value);
+                        await this.plugin.saveSettings();
+                        renderLearnedRelationships();
+                    }))
+                .addButton(button => button
+                    .setIcon("rotate-ccw")
+                    .setTooltip("Reset to default")
+                    .onClick(async () => {
+                        this.plugin.settings.learnedVaultRelationCacheLimit = DEFAULT_SETTINGS.learnedVaultRelationCacheLimit;
+                        await this.plugin.saveSettings();
+                        this.refreshDisplayAnimated();
+                    }));
+
+            const learnedRelationshipsHostEl = candidatePanelEl.createDiv();
+            renderLearnedRelationships = () => {
+                learnedRelationshipsHostEl.empty();
+                const relations = [...this.plugin.settings.learnedVaultRelations]
+                    .sort((a, b) => Math.max(b.lastUsedAt, b.lastConfirmedAt) - Math.max(a.lastUsedAt, a.lastConfirmedAt));
+                const visibleRelations = relations.slice(0, 50);
+                learnedRelationshipsHostEl.createEl("p", {
+                    text: relations.length > 0
+                        ? `${relations.length} relationship${relations.length === 1 ? "" : "s"} retained${relations.length > visibleRelations.length ? `; showing the ${visibleRelations.length} most recently used` : ""}. These connect evidence wording to an active Vault Awareness candidate without asking Ollama to rediscover that relationship.`
+                        : "No relationships have been learned yet. Ollama can add one after it accepts a Vault Awareness candidate through different wording.",
+                    cls: "setting-item-description",
+                });
+                if (relations.length > 0) {
+                    const listEl = learnedRelationshipsHostEl.createDiv({ cls: "autotag-learned-relations-list" });
+                    visibleRelations.forEach(relation => {
+                        const rowEl = listEl.createDiv({ cls: "autotag-learned-relation-row" });
+                        const textEl = rowEl.createDiv({ cls: "autotag-learned-relation-text" });
+                        textEl.createSpan({
+                            text: `${relation.evidence} → ${relation.candidate}`,
+                            cls: "autotag-learned-relation-route",
+                        });
+                        textEl.createSpan({
+                            text: `${relation.relationType.replace(/-/g, " ")} · ${this.plugin.isLearnedVaultRelationReusable(relation) ? "ready" : "awaiting confirmation"} · ${relation.confirmations} confirmation${relation.confirmations === 1 ? "" : "s"}${relation.model ? ` · ${relation.model}` : ""}`,
+                            cls: "setting-item-description autotag-learned-relation-meta",
+                        });
+                        const deleteButtonEl = rowEl.createEl("button", {
+                            cls: "clickable-icon autotag-learned-relation-delete",
+                            attr: { "aria-label": `Forget ${relation.evidence} to ${relation.candidate}` },
+                        });
+                        setIcon(deleteButtonEl, "trash");
+                        deleteButtonEl.addEventListener("click", () => {
+                            void (async () => {
+                                this.plugin.settings.learnedVaultRelations = this.plugin.settings.learnedVaultRelations.filter(entry => entry !== relation);
+                                await this.plugin.saveSettings();
+                                renderLearnedRelationships();
+                            })();
+                        });
+                    });
+                }
+                new Setting(learnedRelationshipsHostEl)
+                    .setName("Clear learned relationships")
+                    .setDesc("Forgets all cached Ollama relationship recognitions in this vault. Vault vocabulary and existing note properties are not changed.")
+                    .addButton(button => button
+                        .setButtonText("Clear")
+                        .setWarning()
+                        .setDisabled(relations.length === 0)
+                        .onClick(async () => {
+                            this.plugin.settings.learnedVaultRelations = [];
+                            await this.plugin.saveSettings();
+                            renderLearnedRelationships();
+                            new Notice("Cleared learned Vault Awareness relationships.");
+                        }));
+            };
+            renderLearnedRelationships();
+
             vaultBodyEl.createEl("h4", { text: "Vault Awareness Output" });
-            const outputPanelEl = vaultBodyEl.createDiv({ cls: "bfm-autotag-property-panel bfm-autotag-vault-output-panel" });
+            const outputPanelEl = vaultBodyEl.createDiv({ cls: "autotag-property-panel autotag-vault-output-panel" });
             outputPanelEl.createEl("h5", { text: "Recognized Vault Tags" });
             outputPanelEl.createEl("p", {
                 text: "By default, recognized Vault Awareness tags feed back into AI Tags. Enable separate output to also route those recognized vault tags into another property.",
@@ -11987,24 +15338,20 @@ class BfmAutotagSettingTab extends PluginSettingTab {
                 outputFieldsHostEl.empty();
                 if (!this.plugin.settings.vaultAwarenessOutputEnabled) return;
                 const outputFieldsEl = this.createSettingsRevealContainer(outputFieldsHostEl);
-                const availableProperties = Array.from(new Set([
-                    ...this.getPropertyNameSuggestions(),
-                    this.plugin.settings.vaultAwarenessOutputPropertyName,
-                    DEFAULT_SETTINGS.vaultAwarenessOutputPropertyName,
-                ])).filter(Boolean).sort((a, b) => a.localeCompare(b));
 
-                new Setting(outputFieldsEl)
+                const outputPropertySetting = new Setting(outputFieldsEl)
                     .setName("Vault Awareness Tags Property")
-                    .setDesc("Property that receives recognized Vault Awareness tags when separate output is enabled.")
-                    .addDropdown(dropdown => {
-                        availableProperties.forEach(property => dropdown.addOption(property, property));
-                        dropdown
+                    .setDesc("Property that receives recognized Vault Awareness tags when separate output is enabled. Type any property name or choose a searchable suggestion from the active template, detected vault properties, and plugin properties.")
+                    .addText(text => {
+                        this.attachTextSuggestions(text.inputEl, this.getPropertyNameSuggestions());
+                        text.setPlaceholder(DEFAULT_SETTINGS.vaultAwarenessOutputPropertyName)
                             .setValue(this.plugin.settings.vaultAwarenessOutputPropertyName)
                             .onChange(async value => {
                                 this.plugin.settings.vaultAwarenessOutputPropertyName = this.plugin.normalizePropertyName(value, DEFAULT_SETTINGS.vaultAwarenessOutputPropertyName);
                                 await this.plugin.saveSettings();
                             });
                     });
+                outputPropertySetting.settingEl.id = "autotag-vault-awareness-output-property";
 
                 const outputFormatSetting = new Setting(outputFieldsEl)
                     .setName("Vault Awareness Tags Format")
@@ -12057,6 +15404,22 @@ class BfmAutotagSettingTab extends PluginSettingTab {
         renderVaultEnabled();
         if (this.plugin.settings.vaultAwarenessEnabled) this.forceSettingsBodyOpen(vaultHostEl);
         this.createSettingsAnchor(containerEl, "ai-tags", "AI Tags");
+        this.renderProblemWarningPanel(
+            containerEl,
+            "autotag-image-analysis-warning",
+            "Image Analysis attention",
+            this.getImageAnalysisProblemWarningLines(),
+            "warning",
+            "Image Analysis uses the selected local Ollama vision model to create the visual description that AI tags and AI descriptions build on."
+        );
+        this.renderProblemWarningPanel(
+            containerEl,
+            "autotag-ai-ollama-warning",
+            "Tag model attention",
+            this.getOllamaProblemWarningLines(),
+            "warning",
+            "Ollama must be reachable and the selected model must be installed before local AI tagging can add semantic tags."
+        );
         const aiTagsHowHostEl = containerEl.createDiv();
         const renderAiTagsHow = () => {
             aiTagsHowHostEl.empty();
@@ -12082,6 +15445,10 @@ class BfmAutotagSettingTab extends PluginSettingTab {
                 .onChange(async (value) => {
                     this.plugin.settings.aiTaggingEnabled = value;
                     await this.plugin.saveSettings();
+                    if (this.plugin.settings.vaultAwarenessEnabled) {
+                        this.animateSettingsContent(vaultHostEl, renderVaultEnabled);
+                    }
+                    this.animateInlineDependencyWarning(vaultToggleWarningHostEl!, renderVaultToggleWarning);
                     if (value) {
                         this.animateSettingsCollapseThenRender(aiTagsHowHostEl, renderAiTagsHow);
                         this.animateSettingsContent(aiTagsHostEl, renderAiTagsEnabled);
@@ -12091,8 +15458,10 @@ class BfmAutotagSettingTab extends PluginSettingTab {
                     }
                 }));
 
-        const aiTagsHostEl = containerEl.createDiv({ cls: "bfm-autotag-ai-enabled-host" });
+        const aiTagsHostEl = containerEl.createDiv({ cls: "autotag-ai-enabled-host" });
         const renderAiTagsEnabled = () => {
+            aiTagsHostEl.empty();
+            if (!this.plugin.settings.aiTaggingEnabled) return;
             this.renderAiEnabledSettings(aiTagsHostEl);
             this.enhanceInfoDescriptionAnimations(aiTagsHostEl);
         };
@@ -12100,40 +15469,295 @@ class BfmAutotagSettingTab extends PluginSettingTab {
         if (this.plugin.settings.aiTaggingEnabled) this.forceSettingsBodyOpen(aiTagsHostEl);
         this.createSettingsAnchor(containerEl, "bridge", "Bridge");
         const bridgeHowHostEl = containerEl.createDiv();
+        const shouldShowBridgeHow = () => !this.plugin.settings.bridgeEnabled && !this.plugin.settings.manualEnrichmentEnabled;
         const renderBridgeHow = () => {
             bridgeHowHostEl.empty();
-            if (this.plugin.settings.bridgeEnabled) return;
+            if (!shouldShowBridgeHow()) return;
             this.renderHowItWorksPanel(
                 bridgeHowHostEl,
                 "How Bridge Enrichment works",
-                "Bridge adds your own concept relationships during AI tagging. Subject Bridge rules connect source concepts to target concepts, such as House => Architecture. Manual Enrichment rules add extra related tags from an already generated tag, such as Castle => Fortress."
+                "Bridge Enrichment lets your own rules add related concepts. Evidence-aware rules use the AI tagging pass to judge configured source concepts against enabled evidence. Direct expansion is deterministic and can trigger from any usable Bridge input, including filename, Folder Tags, Geolocation Tags, or accepted AI tags."
             );
         };
         renderBridgeHow();
 
-        new Setting(containerEl)
-            .setName("Enable Bridge Enrichment")
-            .setDesc("Applies your personal bridge and enrichment rules during AI tagging. This can add intentional related concepts before Vault Awareness sees the generated tags.")
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.bridgeEnabled)
-                .onChange(async value => {
-                    this.plugin.settings.bridgeEnabled = value;
-                    await this.plugin.saveSettings();
-                    if (value) {
-                        this.animateSettingsCollapseThenRender(bridgeHowHostEl, renderBridgeHow);
-                        this.animateSettingsContent(bridgeHostEl, renderBridgeEnabled);
-                    } else {
-                        this.animateSettingsContent(bridgeHowHostEl, renderBridgeHow);
-                        this.animateSettingsCollapseThenRender(bridgeHostEl, renderBridgeEnabled);
-                    }
-                }));
-
         const bridgeHostEl = containerEl.createDiv();
         const renderBridgeEnabled = () => {
             bridgeHostEl.empty();
-            if (!this.plugin.settings.bridgeEnabled) return;
             const bridgeBodyEl = this.createSettingsRevealContainer(bridgeHostEl);
-            bridgeBodyEl.createEl("h4", { text: "Bridge Setup" });
+            bridgeBodyEl.createEl("h4", { text: "Bridge Enrichment Rules" });
+            const rerenderBridge = () => this.animateSettingsContent(bridgeHostEl, renderBridgeEnabled);
+            const bridgeAnyEnabled = this.plugin.settings.bridgeEnabled || this.plugin.settings.manualEnrichmentEnabled;
+            let evidenceWarningHostEl: HTMLElement | null = null;
+            let directExpansionWarningHostEl: HTMLElement | null = null;
+            let bridgeEngineWarningHostEl: HTMLElement | null = null;
+            let aiInputTaggingWarningHostEl: HTMLElement | null = null;
+            let aiInputOffWarningHostEl: HTMLElement | null = null;
+            let filenameWarningHostEl: HTMLElement | null = null;
+            let folderWarningHostEl: HTMLElement | null = null;
+            let geolocationWarningHostEl: HTMLElement | null = null;
+            let vaultOutputWarningHostEl: HTMLElement | null = null;
+            const renderEvidenceWarning = () => {
+                if (!evidenceWarningHostEl) return;
+                evidenceWarningHostEl.empty();
+                this.renderInlineDependencyWarning(
+                    evidenceWarningHostEl,
+                    "Evidence-aware Bridge needs AI Tagging",
+                    this.plugin.settings.bridgeEnabled && !this.plugin.settings.aiTaggingEnabled
+                        ? ["Evidence-aware Bridge runs during AI Tagging, so it cannot affect output until AI Tagging is enabled."]
+                        : [],
+                    this.getSettingsSectionIcon("ai-tags")
+                );
+            };
+            const renderDirectExpansionWarning = () => {
+                if (!directExpansionWarningHostEl) return;
+                directExpansionWarningHostEl.empty();
+                this.renderInlineDependencyWarning(
+                    directExpansionWarningHostEl,
+                    "Direct expansion has no usable input",
+                    this.plugin.settings.manualEnrichmentEnabled && !this.plugin.hasUsableBridgeInput()
+                        ? ["Direct expansion can work without AI, but it needs at least one usable Bridge input: AI tags, filename candidates, Folder Tags candidates, or Geolocation Tags."]
+                        : [],
+                    this.getSettingsSectionIcon("bridge")
+                );
+            };
+            const renderBridgeEngineWarning = () => {
+                if (!bridgeEngineWarningHostEl) return;
+                bridgeEngineWarningHostEl.empty();
+                const lines = this.plugin.settings.bridgeEnabled
+                    && !this.plugin.settings.bridgeUseAiInput
+                    && !this.plugin.settings.bridgeUseFilenameInput
+                    && !this.plugin.settings.bridgeUseFolderInput
+                    && !this.plugin.settings.bridgeUseGeolocationInput
+                    ? ["Evidence-aware Bridge is enabled, but every Bridge input is off. Enable at least one input below."]
+                    : [];
+                this.renderInlineDependencyWarning(
+                    bridgeEngineWarningHostEl,
+                    "Bridge dependency",
+                    lines,
+                    this.getSettingsSectionIcon("ai-tags")
+                );
+            };
+            const renderAiInputTaggingWarning = () => {
+                if (!aiInputTaggingWarningHostEl) return;
+                aiInputTaggingWarningHostEl.empty();
+                this.renderInlineDependencyWarning(
+                    aiInputTaggingWarningHostEl,
+                    "AI input is unavailable",
+                    this.plugin.settings.bridgeUseAiInput && !this.plugin.settings.aiTaggingEnabled
+                        ? ["This specific Bridge input is enabled, but AI Tagging is currently disabled. Direct expansion can still use filename, Folder Tags, or Geolocation inputs."]
+                        : [],
+                    this.getSettingsSectionIcon("ai-tags")
+                );
+            };
+            const renderAiInputOffWarning = () => {
+                if (!aiInputOffWarningHostEl) return;
+                aiInputOffWarningHostEl.empty();
+            };
+            const renderFilenameWarning = () => {
+                if (!filenameWarningHostEl) return;
+                filenameWarningHostEl.empty();
+                this.renderInlineDependencyWarning(
+                    filenameWarningHostEl,
+                    "Filename candidates are off",
+                    this.plugin.settings.bridgeEnabled && this.plugin.settings.bridgeUseFilenameInput && this.plugin.settings.filenameCandidateMode === "disabled"
+                        ? ["This input is enabled, but Filename Candidate Mode is Disabled in AI Input."]
+                        : [],
+                    this.getSettingsSectionIcon("ai-tags")
+                );
+            };
+            const renderFolderWarning = () => {
+                if (!folderWarningHostEl) return;
+                folderWarningHostEl.empty();
+                this.renderInlineDependencyWarning(
+                    folderWarningHostEl,
+                    "Folder Tags input is unavailable",
+                    this.plugin.settings.bridgeEnabled && this.plugin.settings.bridgeUseFolderInput && !this.plugin.hasActiveFolderAiCandidateSource()
+                        ? [this.plugin.settings.useFolderTags
+                            ? "No Folder Tags candidate source is set to Consider or All Keywords."
+                            : "Folder Tags are currently disabled."]
+                        : [],
+                    this.getSettingsSectionIcon("folder-tags")
+                );
+            };
+            const renderGeolocationWarning = () => {
+                if (!geolocationWarningHostEl) return;
+                geolocationWarningHostEl.empty();
+                this.renderInlineDependencyWarning(
+                    geolocationWarningHostEl,
+                    "Geolocation Tags are off",
+                    this.plugin.settings.bridgeEnabled && this.plugin.settings.bridgeUseGeolocationInput && !this.plugin.settings.geolocationEnabled
+                        ? ["This input is enabled, but Geolocation Tags are currently disabled."]
+                        : [],
+                    this.getSettingsSectionIcon("geolocation")
+                );
+            };
+            const renderVaultOutputWarning = () => {
+                if (!vaultOutputWarningHostEl) return;
+                vaultOutputWarningHostEl.empty();
+                this.renderInlineDependencyWarning(
+                    vaultOutputWarningHostEl,
+                    "Vault Awareness is off",
+                    this.plugin.settings.bridgeUsePreBridgeVaultAwarenessOutput && !this.plugin.settings.vaultAwarenessEnabled
+                        ? ["This output option is enabled, but Vault Awareness is currently disabled."]
+                        : [],
+                    this.getSettingsSectionIcon("vault-awareness")
+                );
+            };
+            const animateBridgeWarning = (hostEl: HTMLElement | null, render: () => void) => {
+                if (hostEl) this.animateInlineDependencyWarning(hostEl, render);
+            };
+            const updateBridgeAfterEngineToggle = (wasEnabled: boolean, updateWarnings: () => void) => {
+                const isEnabled = this.plugin.settings.bridgeEnabled || this.plugin.settings.manualEnrichmentEnabled;
+                if (wasEnabled !== isEnabled) {
+                    if (isEnabled) {
+                        this.animateSettingsCollapseThenRender(bridgeHowHostEl, renderBridgeHow);
+                    } else {
+                        this.animateSettingsContent(bridgeHowHostEl, renderBridgeHow);
+                    }
+                    rerenderBridge();
+                } else {
+                    updateWarnings();
+                }
+            };
+
+            new Setting(bridgeBodyEl)
+                .setName("Evidence-aware bridge rules")
+                .setDesc("Runs rules against the full available evidence: AI description, generated AI tags, filename candidates, folder candidates, and geolocation context. Example: House => Architecture can trigger when the image description clearly contains a house, even if House was not already an AI tag.")
+                .addToggle(toggle => toggle
+                    .setValue(this.plugin.settings.bridgeEnabled)
+                    .onChange(async value => {
+                        const wasEnabled = this.plugin.settings.bridgeEnabled || this.plugin.settings.manualEnrichmentEnabled;
+                        this.plugin.settings.bridgeEnabled = value;
+                        await this.plugin.saveSettings();
+                        updateBridgeAfterEngineToggle(wasEnabled, () => {
+                            animateBridgeWarning(evidenceWarningHostEl, renderEvidenceWarning);
+                            animateBridgeWarning(bridgeEngineWarningHostEl, renderBridgeEngineWarning);
+                            animateBridgeWarning(filenameWarningHostEl, renderFilenameWarning);
+                            animateBridgeWarning(folderWarningHostEl, renderFolderWarning);
+                            animateBridgeWarning(geolocationWarningHostEl, renderGeolocationWarning);
+                        });
+                    }));
+            evidenceWarningHostEl = bridgeBodyEl.createDiv();
+            renderEvidenceWarning();
+
+            new Setting(bridgeBodyEl)
+                .setName("Direct expansion rules")
+                .setDesc("Runs exact Bridge rules against enabled Bridge inputs without asking AI. Example: Munich => Germany can trigger from filename or geolocation input, and Castle => Fortress can trigger from accepted AI tags when AI input is available. This does not recursively chain.")
+                .addToggle(toggle => toggle
+                    .setValue(this.plugin.settings.manualEnrichmentEnabled)
+                    .onChange(async value => {
+                        const wasEnabled = this.plugin.settings.bridgeEnabled || this.plugin.settings.manualEnrichmentEnabled;
+                        this.plugin.settings.manualEnrichmentEnabled = value;
+                        await this.plugin.saveSettings();
+                        updateBridgeAfterEngineToggle(wasEnabled, () => {
+                            animateBridgeWarning(directExpansionWarningHostEl, renderDirectExpansionWarning);
+                            animateBridgeWarning(aiInputOffWarningHostEl, renderAiInputOffWarning);
+                        });
+                    }));
+            directExpansionWarningHostEl = bridgeBodyEl.createDiv();
+            renderDirectExpansionWarning();
+
+            bridgeEngineWarningHostEl = bridgeBodyEl.createDiv();
+            renderBridgeEngineWarning();
+
+            if (!bridgeAnyEnabled) {
+                this.wrapSubcategoryPanels(bridgeBodyEl);
+                this.enhanceInfoDescriptionAnimations(bridgeBodyEl);
+                return;
+            }
+
+            bridgeBodyEl.createEl("h4", { text: "Bridge Inputs" });
+
+            new Setting(bridgeBodyEl)
+                .setName("Use filename input")
+                .setDesc("Lets evidence-aware Bridge rules use active filename candidates as evidence.")
+                .addToggle(toggle => toggle
+                    .setValue(this.plugin.settings.bridgeUseFilenameInput)
+                    .onChange(async value => {
+                        this.plugin.settings.bridgeUseFilenameInput = value;
+                        await this.plugin.saveSettings();
+                        animateBridgeWarning(filenameWarningHostEl, renderFilenameWarning);
+                        animateBridgeWarning(directExpansionWarningHostEl, renderDirectExpansionWarning);
+                        animateBridgeWarning(bridgeEngineWarningHostEl, renderBridgeEngineWarning);
+                    }));
+            filenameWarningHostEl = bridgeBodyEl.createDiv();
+            renderFilenameWarning();
+
+            this.setSettingNameWithIcon(
+                new Setting(bridgeBodyEl)
+                    .setDesc("Lets evidence-aware Bridge rules use Folder Tags candidates that are set to Consider or All Keywords.")
+                    .addToggle(toggle => toggle
+                        .setValue(this.plugin.settings.bridgeUseFolderInput)
+                        .onChange(async value => {
+                            this.plugin.settings.bridgeUseFolderInput = value;
+                            await this.plugin.saveSettings();
+                            animateBridgeWarning(folderWarningHostEl, renderFolderWarning);
+                            animateBridgeWarning(directExpansionWarningHostEl, renderDirectExpansionWarning);
+                            animateBridgeWarning(bridgeEngineWarningHostEl, renderBridgeEngineWarning);
+                        })),
+                "Use Folder Tags input",
+                this.getSettingsSectionIcon("folder-tags")
+            );
+            folderWarningHostEl = bridgeBodyEl.createDiv();
+            renderFolderWarning();
+
+            this.setSettingNameWithIcon(
+                new Setting(bridgeBodyEl)
+                    .setDesc("Lets evidence-aware Bridge rules use the AI image description and lets direct expansion rules use accepted/generated AI tags when AI Tagging is enabled.")
+                    .addToggle(toggle => toggle
+                        .setValue(this.plugin.settings.bridgeUseAiInput)
+                        .onChange(async value => {
+                            this.plugin.settings.bridgeUseAiInput = value;
+                            await this.plugin.saveSettings();
+                            animateBridgeWarning(aiInputTaggingWarningHostEl, renderAiInputTaggingWarning);
+                            animateBridgeWarning(aiInputOffWarningHostEl, renderAiInputOffWarning);
+                            animateBridgeWarning(directExpansionWarningHostEl, renderDirectExpansionWarning);
+                            animateBridgeWarning(bridgeEngineWarningHostEl, renderBridgeEngineWarning);
+                        })),
+                "Use AI input",
+                this.getSettingsSectionIcon("ai-tags")
+            );
+            aiInputTaggingWarningHostEl = bridgeBodyEl.createDiv();
+            renderAiInputTaggingWarning();
+            aiInputOffWarningHostEl = bridgeBodyEl.createDiv();
+            renderAiInputOffWarning();
+
+            this.setSettingNameWithIcon(
+                new Setting(bridgeBodyEl)
+                    .setDesc("Lets evidence-aware Bridge rules use known GPS and reverse-geocode metadata.")
+                    .addToggle(toggle => toggle
+                        .setValue(this.plugin.settings.bridgeUseGeolocationInput)
+                        .onChange(async value => {
+                            this.plugin.settings.bridgeUseGeolocationInput = value;
+                            await this.plugin.saveSettings();
+                            animateBridgeWarning(geolocationWarningHostEl, renderGeolocationWarning);
+                            animateBridgeWarning(directExpansionWarningHostEl, renderDirectExpansionWarning);
+                            animateBridgeWarning(bridgeEngineWarningHostEl, renderBridgeEngineWarning);
+                        })),
+                "Use Geolocation input",
+                this.getSettingsSectionIcon("geolocation")
+            );
+            geolocationWarningHostEl = bridgeBodyEl.createDiv();
+            renderGeolocationWarning();
+
+            this.setSettingNameWithIcon(
+                new Setting(bridgeBodyEl)
+                .setDesc("When Vault Awareness writes to a separate output property, include evidence-aware Bridge terms in addition to basic Vault Awareness selections. A matched source includes its rule targets; a target that is directly present inside a longer phrase can also be kept without running the rule backward. Example: House => Architecture can output House and Architecture from House evidence, while Gothic Architecture can output Architecture without inventing House.")
+                .addToggle(toggle => toggle
+                    .setValue(this.plugin.settings.bridgeUsePreBridgeVaultAwarenessOutput)
+                    .onChange(async value => {
+                        this.plugin.settings.bridgeUsePreBridgeVaultAwarenessOutput = value;
+                        await this.plugin.saveSettings();
+                        animateBridgeWarning(vaultOutputWarningHostEl, renderVaultOutputWarning);
+                    })),
+                "Use Pre-Bridge Terms in Vault Awareness Output",
+                this.getSettingsSectionIcon("vault-awareness")
+            );
+            vaultOutputWarningHostEl = bridgeBodyEl.createDiv();
+            renderVaultOutputWarning();
+
+            bridgeBodyEl.createEl("h4", { text: "Bridge Matching" });
 
             new Setting(bridgeBodyEl)
                 .setName("Hide linguistic features for Bridge Enrichment")
@@ -12155,45 +15779,23 @@ class BfmAutotagSettingTab extends PluginSettingTab {
             if (!this.plugin.settings.hideBridgeLinguisticFeatures) this.forceSettingsBodyOpen(bridgeLinguisticsHostEl);
 
             new Setting(bridgeBodyEl)
-                .setName("Manual Subject Bridge Enrichment Rules")
-                .setDesc("One rule per line. If any left-side source concept is recognized, the right-side target concepts are added as intentional bridge tags. Example: House, Structure => Architecture. These rules are best for stable personal concept routes, not loose associations.")
+                .setName("Bridge rule list")
+                .setDesc("One rule per line, shared by both Bridge engines. Evidence-aware rules ask the AI tag pass whether enabled evidence represents a left-side source concept. Direct expansion runs locally when a left-side source is found in any usable Bridge input. Example: House, Structure => Architecture.")
                 .addTextArea(textArea => {
                     textArea.inputEl.rows = 5;
-                    textArea.setPlaceholder("House, Structure, Bridge => Architecture\nCartoon => Anime, Drawing")
-                        .setValue(this.plugin.settings.manualSubjectBridgeRules)
+                    textArea.setPlaceholder("House, Structure, Building => Architecture\nCartoon => Anime, Drawing")
+                        .setValue(this.plugin.getCombinedBridgeRuleText())
                         .onChange(async (value) => {
-                            this.plugin.settings.manualSubjectBridgeRules = value;
+                            this.plugin.settings.bridgeRules = value;
                             await this.plugin.saveSettings();
                         });
                 });
 
-            new Setting(bridgeBodyEl)
-                .setName("Use Pre-Bridge Terms in Vault Awareness Output")
-                .setDesc("When Vault Awareness writes to a separate output property, include bridge-related terms that were part of the bridge route, not only the term selected by Vault Awareness. Example: with House => Architecture, this can allow House to appear beside Architecture in the Vault Awareness output. Turn off to write only the basic Vault Awareness selections.")
-                .addToggle(toggle => toggle
-                    .setValue(this.plugin.settings.bridgeUsePreBridgeVaultAwarenessOutput)
-                    .onChange(async value => {
-                        this.plugin.settings.bridgeUsePreBridgeVaultAwarenessOutput = value;
-                        await this.plugin.saveSettings();
-                    }));
-
-            new Setting(bridgeBodyEl)
-                .setName("Manual Enrichment Rules")
-                .setDesc("One rule per line. If the generated tag on the left appears, add the right-side terms as extra AI tags. Example: Castle => Fortress, Stronghold, Architecture. These are direct expansions of generated tags and do not recursively chain.")
-                .addTextArea(textArea => {
-                    textArea.inputEl.rows = 5;
-                    textArea.setPlaceholder("Castle => Fortress, Stronghold, Architecture\nSword => Weapon")
-                        .setValue(this.plugin.settings.manualEnrichmentRules)
-                        .onChange(async (value) => {
-                            this.plugin.settings.manualEnrichmentRules = value;
-                            await this.plugin.saveSettings();
-                        });
-                });
             this.wrapSubcategoryPanels(bridgeBodyEl);
             this.enhanceInfoDescriptionAnimations(bridgeBodyEl);
         };
         renderBridgeEnabled();
-        if (this.plugin.settings.bridgeEnabled) this.forceSettingsBodyOpen(bridgeHostEl);
+        this.forceSettingsBodyOpen(bridgeHostEl);
         this.createSettingsAnchor(containerEl, 'qol', 'Quality of Life');
 
         containerEl.createEl("h4", { text: "Companion Notes" });
@@ -12232,27 +15834,6 @@ class BfmAutotagSettingTab extends PluginSettingTab {
                 }));
 
         new Setting(containerEl)
-            .setName("Create missing companion note")
-            .setDesc("If Binary File Manager does not create the companion note after the configured retry attempts, Autotag creates the expected note itself and continues processing.")
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.createMissingCompanionNote)
-                .onChange(async value => {
-                    this.plugin.settings.createMissingCompanionNote = value;
-                    await this.plugin.saveSettings();
-                }));
-
-        new Setting(containerEl)
-            .setName("Delete File that did not get a Companion Note")
-            .setDesc("Even after retry, if enabled, Autotag deletes source images that still have no companion note after BFM and Autotag both had a chance to create one. Counter of lonely deleted images: " + this.plugin.settings.lonelyDeletedImageCount)
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.deleteLonelyFileWithoutCompanion)
-                .onChange(async value => {
-                    this.plugin.settings.deleteLonelyFileWithoutCompanion = value;
-                    await this.plugin.saveSettings();
-                    this.refreshDisplayAnimated();
-                }));
-
-        new Setting(containerEl)
             .setName("Delete linked image/note pair")
             .setDesc("When an image or its companion note is deleted, also delete the linked counterpart and stop queued processing for both. For smoother pair deletion, set Obsidian Settings > Files and links > Delete attachments when deleting files to Never. Turning this off still cleans queue/hash state for the deleted file itself.")
             .addToggle(toggle => toggle
@@ -12262,100 +15843,34 @@ class BfmAutotagSettingTab extends PluginSettingTab {
                     await this.plugin.saveSettings();
                 }));
 
-
-        this.renderClearDropdownExcludedProperties(containerEl);
         this.renderLimitedFileTypeWarningSettings(containerEl);
         containerEl.createEl('h4', { text: 'Fix' });
-        const duplicateWarningLines: string[] = [];
+        const duplicateFixWarningLines: string[] = [];
+        const duplicateHashWarningLines: string[] = [];
+        const duplicateManualPairWarningLines: string[] = [];
         if (duplicateUnhashedFileCount > 0) {
-            duplicateWarningLines.push(`${duplicateUnhashedFileCount} file${duplicateUnhashedFileCount === 1 ? "" : "s"} under the watched base path do not have duplicate hashes yet. Use Regenerate hashes for all files, Copy unhashed file paths, or Move affected Files.`);
+            duplicateHashWarningLines.push(`${duplicateUnhashedFileCount} watched file${duplicateUnhashedFileCount === 1 ? " is" : "s are"} missing duplicate hash records. Use Regenerate hashes for all files, Copy unhashed file paths, or Move affected Files.`);
         }
         if (duplicateUnlinkedHashCount > 0) {
-            duplicateWarningLines.push(`${duplicateUnlinkedHashCount} duplicate hash record${duplicateUnlinkedHashCount === 1 ? "" : "s"} point to missing files. Use Copy unlinked hash details, Move affected Files, or Delete unlinked hashes.`);
+            duplicateHashWarningLines.push(`${duplicateUnlinkedHashCount} duplicate hash record${duplicateUnlinkedHashCount === 1 ? "" : "s"} point to files that no longer exist. Use Copy unlinked hash details, Move affected Files, or Delete unlinked hashes.`);
         }
         if (duplicateUnpairedFileCount > 0) {
-            duplicateWarningLines.push(`${duplicateUnpairedFileCount} pairable file${duplicateUnpairedFileCount === 1 ? "" : "s"} are not paired. Use Manual Pairing, Copy unpaired file paths, Delete unpaired files, or Move affected Files.`);
+            duplicateManualPairWarningLines.push(`${duplicateUnpairedFileCount} pairable file${duplicateUnpairedFileCount === 1 ? " is" : "s are"} not linked in the pair database. Use Manual Pairing, Copy unpaired file paths, Delete unpaired files, or Move affected Files.`);
         }
-        this.renderAttentionWarningPanel(containerEl, "bfm-autotag-duplicate-cleanup-warning", "Duplicate cleanup attention", duplicateWarningLines);
-
-        new Setting(containerEl)
-            .setName("Enable Duplicate Protection")
-            .setDesc("Uses file hashes to detect duplicates before AI processing. Turning this off stops duplicate checks but keeps existing hash records until you delete or regenerate them.")
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.useDuplicateProtection)
-                .onChange(async value => {
-                    this.plugin.settings.useDuplicateProtection = value;
-                    await this.plugin.saveSettings();
-                    this.refreshDisplayAnimated();
-                }));
-
-        new Setting(containerEl)
-            .setName("Regenerate hashes for all files")
-            .setDesc("Rebuilds duplicate hashes for files currently under the watched base path.")
-            .addButton(button => button
-                .setButtonText("Regenerate Hashes")
-                .onClick(async () => {
-                    button.setDisabled(true);
-                    button.setButtonText("Regenerating...");
-                    await this.plugin.regenerateDuplicateHashes();
-                    button.setDisabled(false);
-                    button.setButtonText("Regenerate Hashes");
-                    this.refreshDisplayAnimated();
-                }));
-
-        new Setting(containerEl)
-            .setName("Copy unhashed file paths")
-            .setDesc(`${duplicateUnhashedFileCount} file${duplicateUnhashedFileCount === 1 ? "" : "s"} under the watched base path currently have no duplicate hash record.`)
-            .addButton(button => button
-                .setButtonText("Copy Paths")
-                .onClick(async () => {
-                    await this.plugin.copyUnhashedFilesToClipboard();
-                }));
-        this.renderMoveAffectedFilesSetting(
+        if (duplicateHashWarningLines.length > 0) {
+            duplicateFixWarningLines.push("Hash records need attention. Use the Hashes block below to regenerate, move, copy, or delete affected hash records.");
+        }
+        if (duplicateManualPairWarningLines.length > 0) {
+            duplicateFixWarningLines.push("Pair records need attention. Use Search when you need to inspect a pair, then Manual Pairing to repair missing pair links.");
+        }
+        this.renderProblemWarningPanel(
             containerEl,
-            "Choose a vault folder and move source files that currently have no duplicate hash record there.",
-            "Unhashed Files",
-            "unhashed file",
-            () => this.plugin.getUnhashedFiles()
+            "autotag-duplicate-fix-warning",
+            "Duplicate fix attention",
+            duplicateFixWarningLines,
+            "warning",
+            "Duplicate concerns are repaired here. Start with Search when you need to inspect a pair, or jump to the specific repair block below."
         );
-
-        new Setting(containerEl)
-            .setName("Copy unlinked hash details")
-            .setDesc(`${duplicateUnlinkedHashCount} duplicate hash record${duplicateUnlinkedHashCount === 1 ? "" : "s"} point to a missing image or companion note.`)
-            .addButton(button => button
-                .setButtonText("Copy Details")
-                .onClick(async () => {
-                    await this.plugin.copyUnlinkedHashesToClipboard();
-                }));
-        this.renderMoveAffectedFilesSetting(
-            containerEl,
-            "Choose a vault folder and move existing files that belong to unlinked duplicate hash records there.",
-            "Unlinked Hashes",
-            "unlinked hash file",
-            () => this.plugin.getUnlinkedHashAffectedFiles()
-        );
-
-        new Setting(containerEl)
-            .setName("Delete unlinked hashes")
-            .setDesc(`${duplicateUnlinkedHashCount} unlinked duplicate hash record${duplicateUnlinkedHashCount === 1 ? "" : "s"} can be deleted.`)
-            .addButton(button => {
-                button
-                    .setButtonText("Delete Unlinked")
-                    .setWarning()
-                    .onClick(() => {
-                        new ConfirmDestructiveActionModal(
-                            this.app,
-                            "Delete unlinked hashes?",
-                            `This removes ${duplicateUnlinkedHashCount} duplicate hash record${duplicateUnlinkedHashCount === 1 ? "" : "s"} that point to missing files. Existing files and notes are not deleted.`,
-                            "Delete Unlinked",
-                            async () => {
-                                await this.plugin.deleteUnlinkedHashes();
-                                this.refreshDisplayAnimated();
-                            }
-                        ).open();
-                    });
-                button.buttonEl.addClass("bfm-autotag-danger-button");
-            });
 
         const normalizeLookupPath = (value: string): string => value
             .trim()
@@ -12370,7 +15885,9 @@ class BfmAutotagSettingTab extends PluginSettingTab {
             return stored.includes(normalizedQuery) || normalizedQuery.endsWith(stored);
         };
 
-        containerEl.createEl("h4", { text: "Search" });
+        const duplicateSearchPanelEl = containerEl.createDiv({ cls: "autotag-property-panel" });
+        duplicateSearchPanelEl.id = "autotag-duplicate-fix-start";
+        duplicateSearchPanelEl.createEl("h5", { text: "Search" });
         let pairLookupByFileText = "Enter part of an image or companion path to find its pair ID.";
         let pairLookupByFilePairId = "";
         let pairLookupByFileResult: HTMLElement;
@@ -12392,7 +15909,7 @@ class BfmAutotagSettingTab extends PluginSettingTab {
                 : "No pair record found for that filename/path.";
             pairLookupByFileResult.setText(pairLookupByFileText);
         };
-        new Setting(containerEl)
+        new Setting(duplicateSearchPanelEl)
             .setName("Search filename for Pair ID")
             .setDesc("Search the pair database by image or companion filename/path.")
             .addText(text => {
@@ -12406,7 +15923,7 @@ class BfmAutotagSettingTab extends PluginSettingTab {
                     await navigator.clipboard.writeText(pairLookupByFilePairId);
                     new Notice(pairLookupByFilePairId ? "Pair ID copied." : "No pair ID to copy.");
                 }));
-        pairLookupByFileResult = containerEl.createEl("p", { cls: "setting-item-description" });
+        pairLookupByFileResult = duplicateSearchPanelEl.createEl("p", { cls: "setting-item-description" });
         updatePairLookupByFile("");
 
         let pairLookupByIdText = "Enter a pair ID to show its image and companion paths.";
@@ -12437,7 +15954,7 @@ class BfmAutotagSettingTab extends PluginSettingTab {
             pairLookupByIdText = record ? "" : "No pair record found for that ID.";
             renderPairLookupByIdResult();
         };
-        new Setting(containerEl)
+        new Setting(duplicateSearchPanelEl)
             .setName("Search Pair ID for FilePaths of File and Companion note")
             .setDesc("Search the pair database by pair ID and show both paths.")
             .addText(text => {
@@ -12457,11 +15974,21 @@ class BfmAutotagSettingTab extends PluginSettingTab {
                     await navigator.clipboard.writeText(pairLookupByIdNotePath);
                     new Notice(pairLookupByIdNotePath ? "Companion path copied." : "No companion path to copy.");
                 }));
-        pairLookupByIdResult = containerEl.createEl("p", { cls: "setting-item-description" });
+        pairLookupByIdResult = duplicateSearchPanelEl.createEl("p", { cls: "setting-item-description" });
         updatePairLookupById("");
 
-        containerEl.createEl("h4", { text: "Manual Pairing" });
-        containerEl.createEl("p", {
+        const duplicateManualPairPanelEl = containerEl.createDiv({ cls: "autotag-property-panel" });
+        duplicateManualPairPanelEl.id = "autotag-duplicate-manual-pair";
+        duplicateManualPairPanelEl.createEl("h5", { text: "Manual Pairing" });
+        this.renderProblemWarningPanel(
+            duplicateManualPairPanelEl,
+            "autotag-duplicate-manual-pair-warning",
+            "Manual pairing attention",
+            duplicateManualPairWarningLines,
+            "warning",
+            "Manual pairing repairs the internal link between one source file and one companion note without moving or deleting either file."
+        );
+        duplicateManualPairPanelEl.createEl("p", {
             text: "Manually pair an image/source file with its companion note in Autotag's internal pair database. This does not move, rename, or delete files.",
             cls: "setting-item-description",
         });
@@ -12504,10 +16031,10 @@ class BfmAutotagSettingTab extends PluginSettingTab {
         const updateManualPairNote = (value: string) => {
             const file = findManualPairNoteFile(value);
             manualPairNotePath = file?.path ?? "";
-            renderManualPairSearchResult(manualPairNoteResult, file, value.trim() ? "No companion note found in BFM New File Location." : "Search for the companion note in BFM New File Location to pair.");
+            renderManualPairSearchResult(manualPairNoteResult, file, value.trim() ? "No companion note found in the Companion Note Folder." : "Search for the companion note in the Companion Note Folder to pair.");
         };
 
-        new Setting(containerEl)
+        new Setting(duplicateManualPairPanelEl)
             .setName("Manual pair image/source file")
             .setDesc("Searches only watched/source files inside the Base Path. You can use filename, vault-relative path, or full Windows path.")
             .addText(text => {
@@ -12515,21 +16042,21 @@ class BfmAutotagSettingTab extends PluginSettingTab {
                 text.setPlaceholder("Beach Room.jpg")
                     .onChange(value => updateManualPairImage(value));
             });
-        manualPairImageResult = containerEl.createEl("p", { cls: "setting-item-description" });
+        manualPairImageResult = duplicateManualPairPanelEl.createEl("p", { cls: "setting-item-description" });
         updateManualPairImage("");
 
-        new Setting(containerEl)
+        new Setting(duplicateManualPairPanelEl)
             .setName("Manual pair companion note")
-            .setDesc("Searches only markdown companion notes inside the BFM New File Location. You can use filename, vault-relative path, or full Windows path.")
+            .setDesc("Searches only markdown companion notes inside the Companion Note Folder. You can use filename, vault-relative path, or full Windows path.")
             .addText(text => {
-                this.attachTextSuggestions(text.inputEl, this.plugin.getManualPairNoteFiles().map(file => this.getPathSuggestionRelativeToRoot(file.path, this.plugin.settings.bfmNewFileLocation)));
+                this.attachTextSuggestions(text.inputEl, this.plugin.getManualPairNoteFiles().map(file => this.getPathSuggestionRelativeToRoot(file.path, this.plugin.getEffectiveCompanionNoteFolder())));
                 text.setPlaceholder("Ata_Beach Room_jpg.md")
                     .onChange(value => updateManualPairNote(value));
             });
-        manualPairNoteResult = containerEl.createEl("p", { cls: "setting-item-description" });
+        manualPairNoteResult = duplicateManualPairPanelEl.createEl("p", { cls: "setting-item-description" });
         updateManualPairNote("");
 
-        new Setting(containerEl)
+        new Setting(duplicateManualPairPanelEl)
             .setName("Pair selected files")
             .setDesc("Creates or updates one Pair ID for the selected image/source file and companion note.")
             .addButton(button => button
@@ -12544,7 +16071,7 @@ class BfmAutotagSettingTab extends PluginSettingTab {
                     this.refreshDisplayAnimated();
                 }));
 
-        new Setting(containerEl)
+        new Setting(duplicateManualPairPanelEl)
             .setName("Copy unpaired file paths")
             .setDesc(`${duplicateUnpairedFileCount} pairable file${duplicateUnpairedFileCount === 1 ? "" : "s"} are not currently in the pair database.`)
             .addButton(button => button
@@ -12553,14 +16080,14 @@ class BfmAutotagSettingTab extends PluginSettingTab {
                     await this.plugin.copyUnpairedFilesToClipboard();
                 }));
         this.renderMoveAffectedFilesSetting(
-            containerEl,
+            duplicateManualPairPanelEl,
             "Choose a vault folder and move currently unpaired image/source files or companion notes there.",
             "Unpaired Files",
             "unpaired file",
             () => this.plugin.getUnpairedFiles()
         );
 
-        new Setting(containerEl)
+        new Setting(duplicateManualPairPanelEl)
             .setName("Delete unpaired files")
             .setDesc(`${duplicateUnpairedFileCount} pairable file${duplicateUnpairedFileCount === 1 ? "" : "s"} are not currently in the pair database. This deletes only those unpaired files and avoids linked-pair cascade.`)
             .addButton(button => {
@@ -12579,7 +16106,87 @@ class BfmAutotagSettingTab extends PluginSettingTab {
                             }
                         ).open();
                     });
-                button.buttonEl.addClass("bfm-autotag-danger-button");
+                button.buttonEl.addClass("autotag-danger-button");
+            });
+
+        const duplicateHashesPanelEl = containerEl.createDiv({ cls: "autotag-property-panel" });
+        duplicateHashesPanelEl.id = "autotag-duplicate-hashes";
+        duplicateHashesPanelEl.createEl("h5", { text: "Hashes" });
+        this.renderProblemWarningPanel(
+            duplicateHashesPanelEl,
+            "autotag-duplicate-hashes-warning",
+            "Hash cleanup attention",
+            duplicateHashWarningLines,
+            "warning",
+            "Hash cleanup repairs the duplicate index so duplicate detection compares against the current vault state."
+        );
+
+        new Setting(duplicateHashesPanelEl)
+            .setName("Regenerate hashes for all files")
+            .setDesc("Rebuilds duplicate hashes for files currently under the watched base path.")
+            .addButton(button => button
+                .setButtonText("Regenerate Hashes")
+                .onClick(async () => {
+                    button.setDisabled(true);
+                    button.setButtonText("Regenerating...");
+                    await this.plugin.regenerateDuplicateHashes();
+                    button.setDisabled(false);
+                    button.setButtonText("Regenerate Hashes");
+                    this.refreshDisplayAnimated();
+                }));
+
+        new Setting(duplicateHashesPanelEl)
+            .setName("Copy unhashed file paths")
+            .setDesc(`${duplicateUnhashedFileCount} file${duplicateUnhashedFileCount === 1 ? "" : "s"} under the watched base path currently have no duplicate hash record.`)
+            .addButton(button => button
+                .setButtonText("Copy Paths")
+                .onClick(async () => {
+                    await this.plugin.copyUnhashedFilesToClipboard();
+                }));
+        this.renderMoveAffectedFilesSetting(
+            duplicateHashesPanelEl,
+            "Choose a vault folder and move source files that currently have no duplicate hash record there.",
+            "Unhashed Files",
+            "unhashed file",
+            () => this.plugin.getUnhashedFiles()
+        );
+
+        new Setting(duplicateHashesPanelEl)
+            .setName("Copy unlinked hash details")
+            .setDesc(`${duplicateUnlinkedHashCount} duplicate hash record${duplicateUnlinkedHashCount === 1 ? "" : "s"} point to a missing image or companion note.`)
+            .addButton(button => button
+                .setButtonText("Copy Details")
+                .onClick(async () => {
+                    await this.plugin.copyUnlinkedHashesToClipboard();
+                }));
+        this.renderMoveAffectedFilesSetting(
+            duplicateHashesPanelEl,
+            "Choose a vault folder and move existing files that belong to unlinked duplicate hash records there.",
+            "Unlinked Hashes",
+            "unlinked hash file",
+            () => this.plugin.getUnlinkedHashAffectedFiles()
+        );
+
+        new Setting(duplicateHashesPanelEl)
+            .setName("Delete unlinked hashes")
+            .setDesc(`${duplicateUnlinkedHashCount} unlinked duplicate hash record${duplicateUnlinkedHashCount === 1 ? "" : "s"} can be deleted.`)
+            .addButton(button => {
+                button
+                    .setButtonText("Delete unlinked hashes")
+                    .setWarning()
+                    .onClick(() => {
+                        new ConfirmDestructiveActionModal(
+                            this.app,
+                            "Delete unlinked hashes?",
+                            `This removes ${duplicateUnlinkedHashCount} duplicate hash record${duplicateUnlinkedHashCount === 1 ? "" : "s"} that point to missing files. Existing files and notes are not deleted.`,
+                            "Delete unlinked hashes",
+                            async () => {
+                                await this.plugin.deleteUnlinkedHashes();
+                                this.refreshDisplayAnimated();
+                            }
+                        ).open();
+                    });
+                button.buttonEl.addClass("autotag-danger-button");
             });
 
         this.createSettingsAnchor(containerEl, 'fix-recover', 'Fix / Recover');
@@ -12593,7 +16200,7 @@ class BfmAutotagSettingTab extends PluginSettingTab {
             const failedFile = this.plugin.getFailedFile(file.path);
             if (this.plugin.isPathProcessing(file.path)) return "Queued or processing now.";
             if (failedFile) return `Failed after ${failedFile.attempts} attempt${failedFile.attempts === 1 ? "" : "s"}.`;
-            if (this.plugin.settings.processedFiles.includes(file.path)) return "Processed before.";
+            if (this.plugin.settings.processedFiles.some(processedPath => this.plugin.areVaultPathsSame(processedPath, file.path))) return "Processed before.";
             if (this.plugin.getProtectedJob(file.path)) return "Logged for resume.";
             return "Unprocessed.";
         };
@@ -12610,7 +16217,7 @@ class BfmAutotagSettingTab extends PluginSettingTab {
             reprocessNotePath = note?.path ?? "";
             reprocessFileResult.empty();
             if (!note) {
-                if (value.trim()) reprocessFileResult.setText("No companion note found in the BFM New File Location.");
+                if (value.trim()) reprocessFileResult.setText("No companion note found in the Companion Note Folder.");
                 return;
             }
             const sourceFile = this.plugin.findSourceFileForCompanionNote(note.path);
@@ -12622,9 +16229,9 @@ class BfmAutotagSettingTab extends PluginSettingTab {
         };
         new Setting(containerEl)
             .setName("Search companion note to process again")
-            .setDesc("Searches companion notes inside the BFM New File Location. The button resolves the linked source file, clears its processed, failed, and resume state, then queues it again.")
+            .setDesc("Searches companion notes inside the Companion Note Folder. The button resolves the linked source file, clears its processed, failed, and resume state, then queues it again.")
             .addText(text => {
-                this.attachTextSuggestions(text.inputEl, this.plugin.getManualPairNoteFiles().map(file => this.getPathSuggestionRelativeToRoot(file.path, this.plugin.settings.bfmNewFileLocation)));
+                this.attachTextSuggestions(text.inputEl, this.plugin.getManualPairNoteFiles().map(file => this.getPathSuggestionRelativeToRoot(file.path, this.plugin.getEffectiveCompanionNoteFolder())));
                 text.setPlaceholder("Ata_Beach Room_jpg.md")
                     .onChange(value => updateReprocessFileSearch(value));
             })
@@ -12666,7 +16273,7 @@ class BfmAutotagSettingTab extends PluginSettingTab {
         };
         new Setting(containerEl)
             .setName("Create missing companion note for source file")
-            .setDesc("Searches image/source files inside the Base Path and creates the expected BFM companion note only when no companion note exists.")
+            .setDesc("Searches image/source files inside the Base Path and creates the expected companion note only when no companion note exists.")
             .addText(text => {
                 this.attachTextSuggestions(text.inputEl, this.plugin.getManualPairImageFiles().map(file => this.getPathSuggestionRelativeToRoot(file.path, this.plugin.settings.basePath)));
                 text.setPlaceholder("Anime/Beach.jpg")
@@ -12690,7 +16297,7 @@ class BfmAutotagSettingTab extends PluginSettingTab {
 
         new Setting(containerEl)
             .setName("Process existing source files")
-            .setDesc("Queues every unprocessed file inside the Base Path for normal Autotag processing. Missing companion notes are created in the BFM New File Location during processing, according to your current settings.")
+            .setDesc("Queues every unprocessed file inside the Base Path for normal Autotag processing. Missing companion notes are created in the Companion Note Folder during processing, according to your current settings.")
             .addButton(button => button
                 .setButtonText("Process Existing Files")
                 .setCta()
@@ -12700,8 +16307,8 @@ class BfmAutotagSettingTab extends PluginSettingTab {
                 }));
 
         new Setting(containerEl)
-            .setName("Index existing files for duplicate protection")
-            .setDesc("Creates missing companion notes for files in the Base Path, pairs them with their notes in the BFM New File Location, and rebuilds the duplicate hash index from the current vault state.")
+            .setName("Index existing files")
+            .setDesc("Scans unprocessed source files inside the Base Path that still need indexing. It creates missing companion notes when needed, pairs source files with their companion notes, and writes duplicate hashes only for those files, leaving already working indexed files alone.")
             .addButton(button => button
                 .setButtonText("Index Existing Files")
                 .onClick(async () => {
@@ -12716,12 +16323,16 @@ class BfmAutotagSettingTab extends PluginSettingTab {
         containerEl.createEl('h4', { text: 'Failed Files' });
         const failedWarningLines: string[] = [];
         if (this.plugin.settings.failedFiles.length > 0) {
-            failedWarningLines.push(`${this.plugin.settings.failedFiles.length} failed file${this.plugin.settings.failedFiles.length === 1 ? "" : "s"} are tracked. Use Retry Failed Files, Copy failed file details, Delete failed files, or Open Failure Help Note.`);
+            failedWarningLines.push(`${this.plugin.settings.failedFiles.length} failed file${this.plugin.settings.failedFiles.length === 1 ? " is" : "s are"} tracked. Use Retry Failed Files, Copy failed file details, Delete failed files, Move affected Files, or Open Failure Help Note.`);
         }
-        if (recoverUnprocessedBaseFiles.length > 0) {
-            failedWarningLines.push(`${recoverUnprocessedBaseFiles.length} watched file${recoverUnprocessedBaseFiles.length === 1 ? "" : "s"} are unprocessed. Use Process all unprocessed files when you want a vault-wide catch-up run.`);
-        }
-        this.renderAttentionWarningPanel(containerEl, "bfm-autotag-fix-recover-warning", "Fix / Recover attention", failedWarningLines);
+        this.renderProblemWarningPanel(
+            containerEl,
+            "autotag-failed-files-warning",
+            "Failed files attention",
+            failedWarningLines,
+            "warning",
+            "Failed files have stopped retrying automatically so the same problem does not loop forever."
+        );
 
         containerEl.createEl('p', {
             text: this.plugin.settings.failedFiles.length > 0
@@ -12787,7 +16398,7 @@ class BfmAutotagSettingTab extends PluginSettingTab {
                             }
                         ).open();
                     });
-                button.buttonEl.addClass("bfm-autotag-danger-button");
+                button.buttonEl.addClass("autotag-danger-button");
             });
         new Setting(containerEl)
             .setName("Delete failed files")
@@ -12809,7 +16420,7 @@ class BfmAutotagSettingTab extends PluginSettingTab {
                             }
                         ).open();
                     });
-                button.buttonEl.addClass("bfm-autotag-danger-button");
+                button.buttonEl.addClass("autotag-danger-button");
             });
         new Setting(containerEl)
             .setName("Open Failure Help Note")
@@ -12822,6 +16433,17 @@ class BfmAutotagSettingTab extends PluginSettingTab {
                     }));
 
         containerEl.createEl('h4', { text: 'Processed Files' });
+        const unprocessedWarningLines = recoverUnprocessedBaseFiles.length > 0
+            ? [`${recoverUnprocessedBaseFiles.length} watched file${recoverUnprocessedBaseFiles.length === 1 ? " is" : "s are"} not marked processed. Use Process all unprocessed files when you want a vault-wide catch-up run.`]
+            : [];
+        this.renderProblemWarningPanel(
+            containerEl,
+            "autotag-unprocessed-files-warning",
+            "Unprocessed files attention",
+            unprocessedWarningLines,
+            "warning",
+            "Unprocessed watched files are available for a catch-up run from the current Base Path."
+        );
         containerEl.createEl('p', {
             text: `${this.plugin.settings.processedFiles.length} processed file${this.plugin.settings.processedFiles.length === 1 ? "" : "s"} tracked. ${recoverUnprocessedBaseFiles.length} unprocessed watched file${recoverUnprocessedBaseFiles.length === 1 ? "" : "s"} available to process.`,
             cls: 'setting-item-description',
@@ -12844,7 +16466,7 @@ class BfmAutotagSettingTab extends PluginSettingTab {
                             }
                         ).open();
 					});
-				button.buttonEl.addClass("bfm-autotag-danger-button");
+				button.buttonEl.addClass("autotag-danger-button");
 			});
 
         new Setting(containerEl)
@@ -12857,10 +16479,12 @@ class BfmAutotagSettingTab extends PluginSettingTab {
                     await this.plugin.processUnprocessedBaseFiles();
                     this.refreshDisplayAnimated();
                 }));
+        this.createSettingsAnchor(containerEl, "thanks", "Thanks");
+        this.renderThanksSettings(containerEl);
         this.organizeRenderedSettingsSections(containerEl);
         this.enhanceInfoDescriptionAnimations(containerEl);
         this.registerInfoCloseGuards(containerEl);
-        const backToTopEl = containerEl.createDiv({ cls: "bfm-autotag-back-to-top" });
+        const backToTopEl = containerEl.createDiv({ cls: "autotag-back-to-top" });
         const backToTopButton = backToTopEl.createEl("button", { text: "Back to top" });
         backToTopButton.type = "button";
         backToTopButton.onclick = () => this.scrollSettingsToTop();
