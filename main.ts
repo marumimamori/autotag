@@ -3832,6 +3832,32 @@ export default class AutotagPlugin extends Plugin {
         return Array.from(selections.values());
     }
 
+    getPotentialLearnedVaultRelationTerms(
+        allowedTerms: string[],
+        evidenceText: string,
+        evidencePhrases: string[]
+    ): string[] {
+        const phrases = new Map<string, string>();
+        const addPhrase = (value: string) => {
+            const normalized = this.normalizeAiTagName(value);
+            if (normalized) phrases.set(normalized.toLowerCase(), normalized);
+        };
+        evidencePhrases.forEach(addPhrase);
+        (evidenceText.match(/[A-Za-z0-9]+/g) ?? [])
+            .filter(word => word.length >= 3)
+            .forEach(addPhrase);
+
+        const relationTypes = ["word-family", "compound", "spelling", "acronym"];
+        return allowedTerms.filter(candidate =>
+            Array.from(phrases.values()).some(evidence =>
+                relationTypes.some(relationType =>
+                    this.isLearnedVaultRelationTypeEnabled(relationType)
+                    && this.isLearnedVaultRelationStructurallyPlausible(evidence, candidate, relationType)
+                )
+            )
+        );
+    }
+
     parseLearnedVaultRelations(content: string): { evidence: string; candidate: string; relationType: string }[] {
         const cleaned = this.stripThinkBlocks(content)
             .replace(/^```(?:json)?\s*/i, "")
@@ -5177,6 +5203,30 @@ export default class AutotagPlugin extends Plugin {
             return [];
         }
         const learnedSelections = this.getLearnedVaultSelections(rankedVocabularyTerms, vaultEvidenceText);
+        const discoverAdditionalRelationships = async (existingTerms: string[]): Promise<string[]> => {
+            const existing = new Set(existingTerms.map(term => term.toLowerCase()));
+            const remainingTerms = rankedVocabularyTerms.filter(term => !existing.has(term.toLowerCase()));
+            const potentialTerms = this.getPotentialLearnedVaultRelationTerms(
+                remainingTerms,
+                vaultEvidenceText,
+                [...learningEvidenceTags, ...filenameCandidates]
+            );
+            if (potentialTerms.length === 0) return existingTerms;
+
+            const discovered = await this.discoverLearnedVaultRelations(
+                potentialTerms,
+                aiDescription,
+                learningEvidenceTags,
+                filenameCandidates,
+                geolocationContextText,
+                endpoint,
+                model
+            );
+            if (discovered.terms.length === 0) return existingTerms;
+            await this.rememberLearnedVaultRelations(discovered.rawText, discovered.terms, vaultEvidenceText, model);
+            return this.normalizeUniqueAiTags([...existingTerms, ...discovered.terms])
+                .slice(0, this.settings.maxVaultAwareAdditions);
+        };
 
         const messages = this.buildOllamaVaultAwarenessMessages(
             baseTags,
@@ -5228,7 +5278,7 @@ export default class AutotagPlugin extends Plugin {
                         model
                     );
                     await this.rememberLearnedVaultRelations(rawText, accepted, vaultEvidenceText, model);
-                    if (accepted.length > 0) return accepted;
+                    if (accepted.length > 0) return await discoverAdditionalRelationships(accepted);
                 }
             } catch (e) {
                 console.warn("Autotag vault awareness attempt threw", {
@@ -5251,22 +5301,11 @@ export default class AutotagPlugin extends Plugin {
                 endpoint,
                 model
             );
-            if (acceptedLearnedSelections.length > 0) return acceptedLearnedSelections;
+            if (acceptedLearnedSelections.length > 0) {
+                return await discoverAdditionalRelationships(acceptedLearnedSelections);
+            }
         }
-        const discovered = await this.discoverLearnedVaultRelations(
-            rankedVocabularyTerms,
-            aiDescription,
-            learningEvidenceTags,
-            filenameCandidates,
-            geolocationContextText,
-            endpoint,
-            model
-        );
-        if (discovered.terms.length > 0) {
-            await this.rememberLearnedVaultRelations(discovered.rawText, discovered.terms, vaultEvidenceText, model);
-            return discovered.terms;
-        }
-        return [];
+        return await discoverAdditionalRelationships([]);
     }
     buildOllamaTagRequestVariants(
         model: string,
