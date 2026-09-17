@@ -1855,49 +1855,6 @@ If your plugin does not need CSS, delete this file.
     background: color-mix(in srgb, var(--text-success, #3ba55d) 8%, var(--background-modifier-hover) 60%);
 }
 
-.autotag-learned-relations-list {
-    max-height: 210px;
-    margin: 8px 0;
-    overflow-y: auto;
-    border-top: 1px solid var(--background-modifier-border);
-    border-bottom: 1px solid var(--background-modifier-border);
-}
-
-.autotag-learned-relation-row {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    min-height: 44px;
-    padding: 7px 4px;
-    border-bottom: 1px solid var(--background-modifier-border);
-}
-
-.autotag-learned-relation-row:last-child {
-    border-bottom: 0;
-}
-
-.autotag-learned-relation-text {
-    display: flex;
-    flex: 1 1 auto;
-    min-width: 0;
-    flex-direction: column;
-    gap: 2px;
-}
-
-.autotag-learned-relation-route,
-.autotag-learned-relation-meta {
-    overflow-wrap: anywhere;
-}
-
-.autotag-learned-relation-route {
-    color: var(--text-normal);
-    font-weight: 600;
-}
-
-.autotag-learned-relation-delete {
-    flex: 0 0 auto;
-}
-
 @keyframes autotag-spin {
     from { transform: rotate(0deg); }
     to { transform: rotate(360deg); }
