@@ -134,7 +134,7 @@ If your plugin does not need CSS, delete this file.
 .autotag-duplicate-processing-status.is-danger {
     border-color: color-mix(in srgb, var(--text-error) 55%, transparent);
     background: color-mix(in srgb, var(--text-error) 14%, transparent);
-    color: var(--text-error);
+    color: var(--text-error, #d64545);
 }
 
 .autotag-duplicate-processing-status.is-accent {
@@ -495,7 +495,8 @@ If your plugin does not need CSS, delete this file.
     margin-top: 12px;
 }
 
-.autotag-settings-tab input[type="range"] {
+.autotag-settings-tab input[type="range"],
+.autotag-relationship-review-modal input[type="range"] {
     accent-color: var(--interactive-accent);
 }
 
@@ -519,13 +520,15 @@ If your plugin does not need CSS, delete this file.
     border-left-color: var(--text-success, #3ba55d);
 }
 
-.autotag-settings-tab input[type="range"]::-webkit-slider-runnable-track {
+.autotag-settings-tab input[type="range"]::-webkit-slider-runnable-track,
+.autotag-relationship-review-modal input[type="range"]::-webkit-slider-runnable-track {
     height: 5px;
     border-radius: 999px;
     background: linear-gradient(90deg, #2f9e44 0%, #f2c94c 55%, #d94848 100%);
 }
 
-.autotag-settings-tab input[type="range"]::-webkit-slider-thumb {
+.autotag-settings-tab input[type="range"]::-webkit-slider-thumb,
+.autotag-relationship-review-modal input[type="range"]::-webkit-slider-thumb {
     margin-top: -5px;
 }
 
@@ -553,13 +556,15 @@ If your plugin does not need CSS, delete this file.
     border-left-color: var(--text-success, #3ba55d);
 }
 
-.autotag-settings-tab input[type="range"] {
+.autotag-settings-tab input[type="range"],
+.autotag-relationship-review-modal input[type="range"] {
     -webkit-appearance: none;
     appearance: none;
     min-width: 150px;
 }
 
-.autotag-settings-tab input[type="range"]::-webkit-slider-thumb {
+.autotag-settings-tab input[type="range"]::-webkit-slider-thumb,
+.autotag-relationship-review-modal input[type="range"]::-webkit-slider-thumb {
     -webkit-appearance: none;
     appearance: none;
     width: 14px;
@@ -571,7 +576,8 @@ If your plugin does not need CSS, delete this file.
     cursor: pointer;
 }
 
-.autotag-settings-tab input[type="range"]::-moz-range-thumb {
+.autotag-settings-tab input[type="range"]::-moz-range-thumb,
+.autotag-relationship-review-modal input[type="range"]::-moz-range-thumb {
     width: 14px;
     height: 14px;
     border: 0;
@@ -707,11 +713,13 @@ If your plugin does not need CSS, delete this file.
     animation: none !important;
 }
 
-.autotag-settings-tab input[type="range"]::-webkit-slider-thumb {
+.autotag-settings-tab input[type="range"]::-webkit-slider-thumb,
+.autotag-relationship-review-modal input[type="range"]::-webkit-slider-thumb {
     clip-path: polygon(0 0, 100% 0, 50% 100%);
 }
 
-.autotag-settings-tab input[type="range"]::-moz-range-thumb {
+.autotag-settings-tab input[type="range"]::-moz-range-thumb,
+.autotag-relationship-review-modal input[type="range"]::-moz-range-thumb {
     clip-path: polygon(0 0, 100% 0, 50% 100%);
 }
 
@@ -1853,6 +1861,194 @@ If your plugin does not need CSS, delete this file.
 
 .autotag-settings-tab .setting-item:has(.checkbox-container.is-enabled):hover {
     background: color-mix(in srgb, var(--text-success, #3ba55d) 8%, var(--background-modifier-hover) 60%);
+}
+
+.autotag-relationship-review-modal {
+    width: min(860px, 92vw);
+}
+
+.autotag-relationship-review-filters {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 6px;
+    margin: 18px 0 12px;
+}
+
+.autotag-relationship-review-filters .setting-item {
+    align-items: center;
+    gap: 16px;
+    margin: 0;
+    padding: 8px 10px !important;
+    border: 1px solid var(--background-modifier-border);
+    border-top: 1px solid var(--background-modifier-border) !important;
+    border-left: 3px solid var(--background-modifier-border-hover);
+    border-radius: 7px !important;
+    box-sizing: border-box;
+    background: color-mix(in srgb, var(--interactive-normal) 28%, transparent);
+    transition: background-color 220ms ease, border-color 220ms ease, box-shadow 220ms ease;
+}
+
+.autotag-relationship-review-filters .setting-item:hover {
+    border-color: var(--background-modifier-border-hover);
+    background: color-mix(in srgb, var(--background-modifier-hover) 65%, var(--interactive-normal) 35%);
+}
+
+.autotag-relationship-review-filters .setting-item-info {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.autotag-relationship-review-filters .setting-item-control {
+    flex: 0 1 360px;
+    min-width: 0;
+    justify-content: flex-end;
+    gap: 10px;
+}
+
+.autotag-relationship-review-filters input[type="text"] {
+    width: 100%;
+    box-sizing: border-box;
+}
+
+.autotag-relationship-review-filters input[type="range"] {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.autotag-slider-value {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 46px;
+    min-height: 26px;
+    padding: 2px 8px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 999px;
+    color: var(--text-muted);
+    background: var(--background-secondary);
+    font-size: 12px;
+    line-height: 1;
+}
+
+.autotag-relationship-review-summary {
+    margin: 12px 0 10px;
+    line-height: 1.45;
+}
+
+.autotag-relationship-review-list {
+    display: grid;
+    gap: 10px;
+    max-height: 56vh;
+    overflow-y: auto;
+    padding: 2px 0 10px;
+}
+
+.autotag-relationship-review-item {
+    padding: 8px 10px;
+    border: 1px solid var(--background-modifier-border);
+    border-left: 3px solid var(--background-modifier-border-hover);
+    border-radius: 7px !important;
+    background: color-mix(in srgb, var(--interactive-normal) 28%, transparent);
+    transition: background-color 220ms ease, border-color 220ms ease, box-shadow 220ms ease;
+}
+
+.autotag-relationship-review-item:hover {
+    border-color: var(--background-modifier-border-hover);
+    background: color-mix(in srgb, var(--background-modifier-hover) 65%, var(--interactive-normal) 35%);
+}
+
+.autotag-relationship-review-heading {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    min-height: 24px;
+    margin: 0 0 6px;
+    padding-bottom: 5px;
+    border-bottom: 1px solid var(--background-modifier-border);
+    line-height: 1.4;
+    overflow-wrap: anywhere;
+}
+
+.autotag-relationship-review-metadata {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px 0;
+    margin-top: 8px;
+    color: var(--text-muted);
+    font-size: var(--font-ui-smaller);
+    line-height: 1.45;
+}
+
+.autotag-relationship-review-metadata span {
+    display: inline-flex;
+    align-items: center;
+}
+
+.autotag-relationship-review-metadata span + span {
+    margin-left: 10px;
+    padding-left: 10px;
+    border-left: 1px solid var(--background-modifier-border);
+}
+
+.autotag-relationship-confidence,
+.autotag-relationship-kept {
+    display: inline-flex;
+    align-items: center;
+    min-height: 20px;
+    padding: 1px 7px;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 999px;
+    color: var(--text-muted);
+    font-size: 11px;
+    line-height: 1;
+}
+
+.autotag-relationship-confidence.is-high,
+.autotag-relationship-kept {
+    border-color: color-mix(in srgb, var(--text-success, #3ba55d) 55%, var(--background-modifier-border));
+    color: var(--text-success, #3ba55d);
+    background: color-mix(in srgb, var(--text-success, #3ba55d) 10%, transparent);
+}
+
+.autotag-relationship-confidence.is-medium {
+    border-color: color-mix(in srgb, var(--text-warning, #f08c00) 55%, var(--background-modifier-border));
+    color: var(--text-warning, #f08c00);
+    background: color-mix(in srgb, var(--text-warning, #f08c00) 10%, transparent);
+}
+
+.autotag-relationship-confidence.is-low {
+    border-color: color-mix(in srgb, var(--text-error, #d64545) 55%, var(--background-modifier-border));
+    color: var(--text-error);
+    background: color-mix(in srgb, var(--text-error, #d64545) 10%, transparent);
+}
+
+.autotag-relationship-review-item > .setting-item {
+    margin-top: 12px;
+    padding: 12px 0 0;
+    border: 0;
+    border-top: 1px solid var(--background-modifier-border);
+}
+
+.autotag-relationship-review-item > .setting-item .setting-item-control {
+    width: 100%;
+    justify-content: flex-end;
+    gap: 8px;
+}
+
+@media (max-width: 700px) {
+    .autotag-relationship-review-filters .setting-item {
+        align-items: stretch;
+        flex-direction: column;
+        gap: 10px;
+    }
+
+    .autotag-relationship-review-filters .setting-item-control {
+        flex: 0 0 auto;
+        width: 100%;
+        justify-content: flex-start;
+    }
 }
 
 @keyframes autotag-spin {
