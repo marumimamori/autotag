@@ -2,7 +2,7 @@
 
 Create and enrich companion notes for files in Obsidian.
 
-**Current version:** `0.1.1`
+**Current version:** `0.1.2`
 
 ---
 
@@ -44,6 +44,18 @@ Create and enrich companion notes for files in Obsidian.
 
 - Obsidian
 - Optional: [Ollama](https://ollama.com/) for local image descriptions, AI tags, Vault Awareness relationship checks, and AI-assisted Bridge matching
+
+## Information
+
+The Health tab shows the current status of the plugin. Clicking a health card can take you directly to the relevant setting or a possible solution.
+
+![Health card states](docs/images/health-states-diagonal.png)
+
+Additional warnings and notices appear throughout the settings in response to different states, helping draw attention to important information when something changes.
+
+![Conditional warning and notice states](docs/images/conditional-states.png)
+
+---
 
 ## Examples
 
@@ -185,7 +197,7 @@ Depending on your output mode, the original AI wording can be preserved while th
 
 ### Bridge Rules
 
-The example also contains `Architecture`. This comes from the manual rule `House => Architecture` and the Pre-Bridge setting shown in the Vault Awareness sources.
+The example also contains both `House` and `Architecture`. Both come from Pre-Bridge output: `House` is the source term, while the manual rule `House => Architecture` adds the connected `Architecture` term.
 
 When **Pre-Bridge terms for Vault Awareness output** is enabled, a fitting manual connection can contribute to Vault Awareness before the term has been written to frontmatter. Otherwise, Bridge rules act as explicit connections between concepts in the form `A => B`.
 

@@ -1166,6 +1166,10 @@ If your plugin does not need CSS, delete this file.
     color: var(--text-warning, #f08c00);
 }
 
+.autotag-health-check-row.is-optional .autotag-health-check-icon {
+    color: var(--text-warning, #f08c00);
+}
+
 .autotag-health-check-row.is-danger .autotag-health-check-icon {
     color: var(--text-error);
 }

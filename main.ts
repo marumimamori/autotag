@@ -179,7 +179,7 @@ type HealthCheckResult = {
     checks?: HealthDashboardCheck[];
 };
 
-type HealthDashboardCheckTone = HealthCheckTone | "spinner";
+type HealthDashboardCheckTone = HealthCheckTone | "optional" | "spinner";
 
 type HealthDashboardCheck = {
     tone: HealthDashboardCheckTone;
@@ -495,6 +495,13 @@ class ProcessingTimings {
             total: `${Date.now() - this.startedAt}ms`,
             ...stageDurations,
         });
+    }
+}
+
+class ProcessingCancelledError extends Error {
+    constructor(readonly filePath: string) {
+        super(`Processing canceled because the file was deleted: ${filePath}`);
+        this.name = "ProcessingCancelledError";
     }
 }
 
@@ -1305,7 +1312,11 @@ export default class AutotagPlugin extends Plugin {
     activeProcessingStartedAt: number | null = null;
     activeProcessingTotal = 0;
     activeProcessingCompleted = 0;
+    activeProcessingCancelled = 0;
     activeWorkerPaths = new Set<string>();
+    batchedProcessingRunIds = new Set<string>();
+    processingAbortControllers = new Map<string, AbortController>();
+    cancelledProcessingRunIds = new Set<string>();
     recentAutoMovedSourcePaths = new Map<string, string>();
     settingTab: AutotagSettingTab | null = null;
     startupAutoProcessTimer: number | null = null;
@@ -1323,6 +1334,99 @@ export default class AutotagPlugin extends Plugin {
     private vaultAwarenessSelectionChain: Promise<void> = Promise.resolve();
     createRunId(path: string): string {
         return Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 10) + "-" + path;
+    }
+
+    ensureProcessingAbortController(runId: string): AbortController {
+        const existing = this.processingAbortControllers.get(runId);
+        if (existing) return existing;
+        const controller = new AbortController();
+        this.processingAbortControllers.set(runId, controller);
+        return controller;
+    }
+
+    isProcessingRunCancelled(runId: string): boolean {
+        return this.cancelledProcessingRunIds.has(runId)
+            || this.processingAbortControllers.get(runId)?.signal.aborted === true;
+    }
+
+    async awaitProcessingRun<T>(filePath: string, runId: string, task: () => Promise<T>): Promise<T> {
+        const controller = this.ensureProcessingAbortController(runId);
+        if (this.isUnloading || controller.signal.aborted || !this.isCurrentRun(filePath, runId)) {
+            throw new ProcessingCancelledError(filePath);
+        }
+
+        return await new Promise<T>((resolve, reject) => {
+            let settled = false;
+            const finish = (callback: () => void): void => {
+                if (settled) return;
+                settled = true;
+                controller.signal.removeEventListener("abort", onAbort);
+                callback();
+            };
+            const onAbort = (): void => finish(() => reject(new ProcessingCancelledError(filePath)));
+            controller.signal.addEventListener("abort", onAbort, { once: true });
+
+            let operation: Promise<T>;
+            try {
+                operation = task();
+            } catch (error) {
+                finish(() => reject(error));
+                return;
+            }
+
+            operation.then(
+                value => finish(() => {
+                    if (this.isUnloading || controller.signal.aborted || !this.isCurrentRun(filePath, runId)) {
+                        reject(new ProcessingCancelledError(filePath));
+                        return;
+                    }
+                    resolve(value);
+                }),
+                error => finish(() => reject(error))
+            );
+        });
+    }
+
+    cancelProcessingRun(runId: string): boolean {
+        if (!runId || this.cancelledProcessingRunIds.has(runId)) return false;
+        this.cancelledProcessingRunIds.add(runId);
+        this.ensureProcessingAbortController(runId).abort();
+        if (this.activeProcessingTotal > this.activeProcessingCompleted) {
+            this.activeProcessingTotal -= 1;
+            this.activeProcessingCancelled += 1;
+        }
+        this.updateActiveProcessingNotice();
+        return true;
+    }
+
+    cancelProcessingForPath(path: string): boolean {
+        const runIds = new Set<string>();
+        const currentRunId = this.getPathKeyValue(this.currentRunIds, path);
+        const queuedRunId = this.getPathKeyValue(this.processingQueue, path)?.runId;
+        const activePair = this.getActiveRunPairForPath(path);
+        if (currentRunId) runIds.add(currentRunId);
+        if (queuedRunId) runIds.add(queuedRunId);
+        if (activePair?.runId) runIds.add(activePair.runId);
+        this.pendingDuplicateActions.forEach(action => {
+            if (this.doesPendingDuplicateActionUsePath(action, path)) runIds.add(action.runId);
+        });
+
+        let cancelled = false;
+        runIds.forEach(runId => {
+            cancelled = this.cancelProcessingRun(runId) || cancelled;
+            if (!this.batchedProcessingRunIds.has(runId)) {
+                window.setTimeout(() => {
+                    if (!this.batchedProcessingRunIds.has(runId)) this.finishProcessingRun(runId);
+                }, 0);
+            }
+        });
+        return cancelled;
+    }
+
+    finishProcessingRun(runId: string): void {
+        this.batchedProcessingRunIds.delete(runId);
+        this.processingAbortControllers.delete(runId);
+        this.cancelledProcessingRunIds.delete(runId);
     }
 
     async runOllamaInference<T>(task: () => Promise<T>): Promise<T> {
@@ -1694,8 +1798,12 @@ export default class AutotagPlugin extends Plugin {
         });
     }
 
-    async analyzeImageFile(file: TFile): Promise<string | null> {
+    async analyzeImageFile(file: TFile, runId?: string): Promise<string | null> {
         if (!this.settings.imageAnalysisEnabled) return null;
+        const ensureActive = (): void => {
+            if (runId && !this.isCurrentRun(file.path, runId)) throw new ProcessingCancelledError(file.path);
+        };
+        ensureActive();
 
         const endpoint = this.getOllamaChatUrl();
         const model = this.getOllamaVisionModel();
@@ -1706,11 +1814,13 @@ export default class AutotagPlugin extends Plugin {
 
         try {
             const imageBase64 = this.arrayBufferToBase64(await this.readFileBinaryCached(file));
+            ensureActive();
             const requestVariants = this.buildOllamaVisionRequestVariants(model, imageBase64);
             let lastError = "unknown error";
             let longestDescription: string | null = null;
 
             for (let attempt = 0; attempt < requestVariants.length; attempt += 1) {
+                ensureActive();
                 const requestBody = requestVariants[attempt];
                 const response = await this.runOllamaInference(() => requestUrl({
                     url: endpoint,
@@ -1719,6 +1829,7 @@ export default class AutotagPlugin extends Plugin {
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify(requestBody),
                 }));
+                ensureActive();
 
                 if (response.status < 200 || response.status >= 300) {
                     lastError = `HTTP ${response.status}: ${response.text?.slice(0, 300) || "no response body"}`;
@@ -1754,6 +1865,7 @@ export default class AutotagPlugin extends Plugin {
             console.warn(`Autotag Ollama vision returned no description for ${file.path}: ${lastError}`);
             return null;
         } catch (e) {
+            if (e instanceof ProcessingCancelledError) throw e;
             console.error("Autotag Ollama vision failed", e);
             return null;
         }
@@ -6898,8 +7010,16 @@ export default class AutotagPlugin extends Plugin {
         folderExcludedCandidateValues: string[] = [],
         folderStrongCandidateValues: string[] = folderCandidateValues,
         folderConsiderCandidateValues: string[] = [],
-        timings?: ProcessingTimings
+        timings?: ProcessingTimings,
+        runId?: string
     ): Promise<GeneratedAiTagResult> {
+        const processingFilePath = file?.path ?? "";
+        const ensureActive = (): void => {
+            if (runId && processingFilePath && !this.isCurrentRun(processingFilePath, runId)) {
+                throw new ProcessingCancelledError(processingFilePath);
+            }
+        };
+        ensureActive();
         const runTimed = <T>(stage: string, task: () => Promise<T>): Promise<T> =>
             timings ? timings.measure(stage, task) : task();
         const filenameCandidates = this.getFilenameKeywordCandidates(file);
@@ -6984,6 +7104,7 @@ export default class AutotagPlugin extends Plugin {
         let lastRawText = "";
 
         for (let attempt = 0; attempt < requestVariants.length; attempt++) {
+            ensureActive();
             const requestBody = requestVariants[attempt];
 
             try {
@@ -6998,6 +7119,7 @@ export default class AutotagPlugin extends Plugin {
                         body: JSON.stringify(requestBody),
                     }))
                 );
+                ensureActive();
 
                 if (response.status < 200 || response.status >= 300) {
                     lastError = `HTTP ${response.status}: ${response.text?.slice(0, 300) || "no response body"}`;
@@ -7018,12 +7140,14 @@ export default class AutotagPlugin extends Plugin {
                 const tags = this.parseAiTags(rawText);
                 const vaultLookupHints = this.parseAiVaultLookupHints(rawText);
                 if (tags.length > 0 || this.isValidVaultAwarenessResponse(rawText)) {
+                    ensureActive();
                     await this.rememberLearnedFilenameStopWords(
                         rawText,
                         filenameStopWordLearningCandidates,
                         file?.path ?? "",
                         model
                     );
+                    ensureActive();
                     const originalAiTags = this.filterUnsupportedCandidateEchoTags(
                         tags.map(tag => this.normalizeAiTagName(tag)),
                         descriptionText,
@@ -7052,6 +7176,7 @@ export default class AutotagPlugin extends Plugin {
                         endpoint,
                         model
                     ));
+                    ensureActive();
                     const tagsWithBridges = [...canonicalTags, ...bridgeTags];
                     const vaultTags = await runTimed("adaptive-vault-matching", () =>
                         this.runVaultAwarenessSelection(() => this.selectVaultAwareTags(
@@ -7070,6 +7195,7 @@ export default class AutotagPlugin extends Plugin {
                             file?.path ?? ""
                         ))
                     );
+                    ensureActive();
                     const postVaultBridgeTags = this.settings.bridgeUsePreBridgeVaultAwarenessOutput
                         ? this.applyDeterministicSubjectBridgeTags(
                             [...tagsWithBridges, ...vaultTags],
@@ -7116,6 +7242,7 @@ export default class AutotagPlugin extends Plugin {
                     lastError = "empty Ollama response";
                 }
             } catch (e) {
+                if (e instanceof ProcessingCancelledError) throw e;
                 lastError = e instanceof Error ? e.message : String(e);
                 console.warn("Autotag Ollama attempt threw", {
                     attempt: attempt + 1,
@@ -8453,10 +8580,16 @@ export default class AutotagPlugin extends Plugin {
         const counts = this.getProcessingActivityCounts();
         this.activeProcessingNotice = null;
         this.activeProcessingStartedAt = null;
-        if (!notice) return;
-        notice.setProgress(100, `Processed ${counts.completed}/${counts.total || counts.completed} file${(counts.total || counts.completed) === 1 ? "" : "s"}. Processing queue complete.`);
+        const cancelled = this.activeProcessingCancelled;
+        const processedTotal = counts.total || counts.completed;
         this.activeProcessingCompleted = 0;
         this.activeProcessingTotal = 0;
+        this.activeProcessingCancelled = 0;
+        if (!notice) return;
+        const completionText = processedTotal === 0 && cancelled > 0
+            ? `Canceled ${cancelled} deleted file${cancelled === 1 ? "" : "s"}. Processing queue complete.`
+            : `Processed ${counts.completed}/${processedTotal} file${processedTotal === 1 ? "" : "s"}. Processing queue complete.${cancelled > 0 ? ` ${cancelled} deleted file${cancelled === 1 ? " was" : "s were"} canceled.` : ""}`;
+        notice.setProgress(100, completionText);
         window.setTimeout(() => notice.hide(), 1800);
     }
 
@@ -8470,6 +8603,7 @@ export default class AutotagPlugin extends Plugin {
         this.activeProcessingStartedAt = null;
         this.activeProcessingCompleted = 0;
         this.activeProcessingTotal = 0;
+        this.activeProcessingCancelled = 0;
         notice?.hide();
     }
 
@@ -8918,6 +9052,10 @@ export default class AutotagPlugin extends Plugin {
 
     getEffectiveCompanionNoteNameFormat(): string {
         return this.settings.companionNoteNameFormat?.trim() || DEFAULT_SETTINGS.companionNoteNameFormat;
+    }
+
+    hasCompanionNoteSourceNameToken(): boolean {
+        return /\{\{(?:name|filename)(?::(?:UP|LOW))?\}\}/i.test(this.getEffectiveCompanionNoteNameFormat());
     }
 
     getTemplateFilePath(): string | null {
@@ -9398,9 +9536,12 @@ ${mapping.property}`;
         return null;
     }
 
-    async createMissingCompanionNote(file: TFile, expectedNotePath: string, showNotice = true): Promise<TFile | null> {
+    async createMissingCompanionNote(file: TFile, expectedNotePath: string, showNotice = true, runId?: string): Promise<TFile | null> {
+        const isActive = (): boolean => !runId || this.isCurrentRun(file.path, runId);
+        if (!isActive()) return null;
         const folderPath = expectedNotePath.split("/").slice(0, -1).join("/");
         await this.ensureVaultFolder(folderPath);
+        if (!isActive()) return null;
 
         const templateText = this.settings.templateSource === "internal"
             ? (this.settings.frontmatterTemplate ?? "").trim().replace(/^---\s*\n?/, "").replace(/\n?---$/, "").trim()
@@ -9421,9 +9562,12 @@ ${mapping.property}`;
         let lastError: unknown = null;
 
         for (let attempt = 0; attempt <= retries; attempt += 1) {
+            if (!isActive()) return null;
             try {
                 const created = await this.app.vault.create(expectedNotePath, initialContent);
+                if (!isActive()) return null;
                 const verified = await this.resolveCreatedCompanionNote(expectedNotePath, created);
+                if (!isActive()) return null;
                 if (verified instanceof TFile) {
                     if (showNotice) new Notice("Autotag created companion note: " + verified.name);
                     return verified;
@@ -9442,6 +9586,7 @@ ${mapping.property}`;
 
             if (attempt < retries) {
                 await this.sleep(this.getRetryWaitMs(attempt + 1));
+                if (!isActive()) return null;
             }
         }
 
@@ -9454,13 +9599,15 @@ ${mapping.property}`;
         return null;
     }
 
-    async getImageGeolocationContext(file: TFile, notePath: string): Promise<ImageGeolocationContext | null> {
+    async getImageGeolocationContext(file: TFile, notePath: string, runId?: string): Promise<ImageGeolocationContext | null> {
         if (!this.settings.geolocationEnabled) return null;
+        const isActive = (): boolean => !runId || this.isCurrentRun(file.path, runId);
+        if (!isActive()) return null;
         const coordinates = await this.readGpsCoordinates(file).catch(error => {
             console.warn("Autotag GPS metadata read failed", file.path, error);
             return null;
         });
-        if (!coordinates) return null;
+        if (!coordinates || !isActive()) return null;
 
         let locationData: Record<string, string> = {
             latitude: String(coordinates.latitude),
@@ -9471,12 +9618,13 @@ ${mapping.property}`;
             try {
                 locationData = { ...locationData, ...(await this.reverseGeocode(coordinates) ?? {}) };
             } catch (error) {
+                if (!isActive()) return null;
                 const reason = error instanceof Error ? error.message : String(error);
                 this.queueGeocodeJob(file.path, notePath, coordinates, reason);
             }
         }
 
-        return { coordinates, locationData };
+        return isActive() ? { coordinates, locationData } : null;
     }
 
     buildGeolocationPropertyItemsFromContext(context: ImageGeolocationContext | null): Record<string, string[]> {
@@ -9652,7 +9800,11 @@ ${mapping.property}`;
         return cleaned || original;
     }
 
-    async enhanceAiDescriptionWithGeolocation(aiDescription: string | null, context: ImageGeolocationContext | null): Promise<string | null> {
+    async enhanceAiDescriptionWithGeolocation(aiDescription: string | null, context: ImageGeolocationContext | null, filePath = "", runId?: string): Promise<string | null> {
+        const ensureActive = (): void => {
+            if (runId && filePath && !this.isCurrentRun(filePath, runId)) throw new ProcessingCancelledError(filePath);
+        };
+        ensureActive();
         const readableDescription = this.cleanHumanReadableAiDescriptionText(aiDescription);
         if (!readableDescription?.trim() || !this.settings.useGeolocationForAiDescription) return readableDescription;
         const contextText = this.formatGeolocationContextForDescription(context);
@@ -9669,6 +9821,7 @@ ${mapping.property}`;
         );
 
         for (let attempt = 0; attempt < requestVariants.length; attempt += 1) {
+            ensureActive();
             try {
                 const response = await this.runOllamaInference(() => requestUrl({
                     url: this.getOllamaChatUrl(),
@@ -9677,6 +9830,7 @@ ${mapping.property}`;
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify(requestVariants[attempt]),
                 }));
+                ensureActive();
                 if (response.status < 200 || response.status >= 300) {
                     console.warn("Autotag geolocation description enhancement attempt failed", {
                         attempt: attempt + 1,
@@ -9694,6 +9848,7 @@ ${mapping.property}`;
                     return cleanedRevised;
                 }
             } catch (error) {
+                if (error instanceof ProcessingCancelledError) throw error;
                 console.warn("Autotag geolocation description enhancement attempt threw", {
                     attempt: attempt + 1,
                     model,
@@ -10257,6 +10412,7 @@ ${frontmatterLines}
         }
 
         const runId = this.createRunId(filePath);
+        this.ensureProcessingAbortController(runId);
         const expectedNotePath = this.getCompanionNotePath(file);
         const pairRecord = this.ensurePairRecordForImage(filePath);
         this.currentRunIds.set(filePath, runId);
@@ -10292,6 +10448,7 @@ ${frontmatterLines}
 
         this.isProcessingQueue = true;
         this.activeProcessingCompleted = 0;
+        this.activeProcessingCancelled = 0;
         this.activeProcessingTotal = Math.max(this.activeProcessingTotal, this.getUniqueProcessingPaths().length);
         this.startActiveProcessingNotice();
 
@@ -10301,6 +10458,7 @@ ${frontmatterLines}
                 const batch = Array.from(this.processingQueue.values())
                     .sort((a, b) => a.file.path.localeCompare(b.file.path));
                 this.activeProcessingTotal = Math.max(this.activeProcessingTotal, this.activeProcessingCompleted + batch.length);
+                batch.forEach(item => this.batchedProcessingRunIds.add(item.runId));
 
                 this.processingQueue.clear();
 
@@ -10312,8 +10470,10 @@ ${frontmatterLines}
                         this.updateActiveProcessingNotice();
                         return this.processQueuedFile(item.file, item.runId)
                         .finally(() => {
+                            const wasCancelled = this.isProcessingRunCancelled(item.runId);
                             this.deletePathFromSet(this.activeWorkerPaths, item.file.path);
-                            this.activeProcessingCompleted += 1;
+                            if (!wasCancelled) this.activeProcessingCompleted += 1;
+                            this.finishProcessingRun(item.runId);
                             this.updateActiveProcessingNotice();
                         });
                     }
@@ -10372,7 +10532,9 @@ ${frontmatterLines}
             let notePath = this.activeRunPairs.get(runId)?.expectedNotePath ?? this.getCompanionNotePath(file);
             const companionWasMissing = !(this.findCompanionNoteForSourceFile(file) instanceof TFile);
             await this.saveProtectedJob(filePath, { stage: "companion-note", notePath, runId });
-            const companionNote = await timings.measure("companion-note", () => this.createMissingCompanionNote(file, notePath, false));
+            const companionNote = await timings.measure("companion-note", () =>
+                this.awaitProcessingRun(filePath, runId, () => this.createMissingCompanionNote(file, notePath, false, runId))
+            );
             if (!this.isCurrentRun(filePath, runId)) return;
             if (companionNote) {
                 notePath = companionNote.path;
@@ -10409,7 +10571,9 @@ ${frontmatterLines}
                 fileExt,
             } = this.buildFolderMetadata(filePath);
 
-            const duplicateHandling = await timings.measure("duplicate-check", () => this.getPreparedDuplicateHandling(file, runId));
+            const duplicateHandling = await timings.measure("duplicate-check", () =>
+                this.awaitProcessingRun(filePath, runId, () => this.getPreparedDuplicateHandling(file, runId))
+            );
             if (!this.isCurrentRun(filePath, runId)) return;
             if (duplicateHandling.match && duplicateHandling.action === "delete-new-pair") {
                 await this.deleteNewDuplicatePair(file, companionNote, runId);
@@ -10417,7 +10581,9 @@ ${frontmatterLines}
             }
             await this.saveProtectedJob(filePath, { stage: "processing", notePath, runId });
 
-            const geolocationContext = await timings.measure("geolocation", () => this.getImageGeolocationContext(file, notePath));
+            const geolocationContext = await timings.measure("geolocation", () =>
+                this.awaitProcessingRun(filePath, runId, () => this.getImageGeolocationContext(file, notePath, runId))
+            );
             const geolocationPropertyItems = this.buildGeolocationPropertyItemsFromContext(geolocationContext);
             const mergedFolderPropertyItems = folderPropertyItems;
 
@@ -10435,12 +10601,18 @@ ${frontmatterLines}
                     || shouldRunAiTagModel;
                 const shouldAnalyzeImage = this.settings.imageAnalysisEnabled && shouldUseAiDescription;
                 aiDescription = shouldAnalyzeImage
-                    ? await timings.measure("image-description", () => this.analyzeImageFile(file))
+                    ? await timings.measure("image-description", () =>
+                        this.awaitProcessingRun(filePath, runId, () => this.analyzeImageFile(file, runId))
+                    )
                     : null;
                 if (shouldUseAiDescription) {
                     aiDescription = await timings.measure(
                         "description-context",
-                        () => this.enhanceAiDescriptionWithGeolocation(aiDescription, geolocationContext)
+                        () => this.awaitProcessingRun(
+                            filePath,
+                            runId,
+                            () => this.enhanceAiDescriptionWithGeolocation(aiDescription, geolocationContext, filePath, runId)
+                        )
                     );
                 }
                 if (!this.isCurrentRun(filePath, runId)) {
@@ -10471,17 +10643,20 @@ ${frontmatterLines}
 
                 const shouldGenerateAiTags = shouldGenerateTagMetadata;
                 const generatedTags = shouldGenerateAiTags
-                    ? await timings.measure("tagging-total", () => this.generateAiTags(
-                        aiDescription,
-                        folderCandidateValues,
-                        file,
-                        geolocationContext,
-                        folderGeneratedValues,
-                        folderExcludedCandidateValues,
-                        folderStrongCandidateValues,
-                        folderConsiderCandidateValues,
-                        timings
-                    ))
+                    ? await timings.measure("tagging-total", () =>
+                        this.awaitProcessingRun(filePath, runId, () => this.generateAiTags(
+                            aiDescription,
+                            folderCandidateValues,
+                            file,
+                            geolocationContext,
+                            folderGeneratedValues,
+                            folderExcludedCandidateValues,
+                            folderStrongCandidateValues,
+                            folderConsiderCandidateValues,
+                            timings,
+                            runId
+                        ))
+                    )
                     : { aiTags: [], vaultAwarenessTags: [] };
                 aiTags = generatedTags.aiTags;
                 vaultAwarenessTags = generatedTags.vaultAwarenessTags;
@@ -10578,14 +10753,15 @@ ${frontmatterLines}
             }
             processingOutcome = "completed";
         } catch (e) {
-            processingOutcome = "failed";
-            if (!this.isCurrentRun(filePath, runId)) {
+            if (e instanceof ProcessingCancelledError || !this.isCurrentRun(filePath, runId)) {
+                processingOutcome = "skipped";
                 this.duplicateFingerprintCache.delete(this.getRunCacheKey(filePath, runId));
                 this.duplicateHandlingCache.delete(this.getRunCacheKey(filePath, runId));
                 this.markDuplicateProcessingComplete(filePath, runId);
                 this.cleanupActiveRunPairsForPath(filePath, runId);
                 return;
             }
+            processingOutcome = "failed";
             this.removeDuplicateRecordsForPath(filePath);
             this.duplicateFingerprintCache.delete(this.getRunCacheKey(filePath, runId));
             this.duplicateHandlingCache.delete(this.getRunCacheKey(filePath, runId));
@@ -10703,14 +10879,15 @@ ${frontmatterLines}
                 if (file.extension.toLowerCase() === "md") {
                     this.scheduleAutomaticFolderPropertySync();
                 }
-                let duplicateActionChanged = this.cancelPendingDuplicateActionsForPath(filePath);
-
                 if (this.deletionCascadePaths.has(filePath)) {
+                    const duplicateActionChanged = this.cancelPendingDuplicateActionsForPath(filePath);
                     const changed = this.cleanupProcessingStateForPath(filePath);
                     if (changed || duplicateActionChanged) await this.saveSettings();
                     return;
                 }
 
+                this.cancelProcessingForPath(filePath);
+                let duplicateActionChanged = this.cancelPendingDuplicateActionsForPath(filePath);
                 const linkedFile = this.settings.deleteLinkedFilePair ? this.getLinkedFileForDeletion(file) : null;
                 const linkedPath = linkedFile instanceof TFile ? linkedFile.path : null;
                 this.suppressDeletedPair(file, linkedFile);
@@ -10855,6 +11032,10 @@ ${frontmatterLines}
         this.deletionSuppressionTimers.clear();
         this.processingQueue.clear();
         this.activeWorkerPaths.clear();
+        this.batchedProcessingRunIds.clear();
+        this.processingAbortControllers.forEach(controller => controller.abort());
+        this.processingAbortControllers.clear();
+        this.cancelledProcessingRunIds.clear();
         this.activeRunPairs.clear();
         this.pendingDuplicateActions.clear();
         this.pendingManualPairActions.clear();
@@ -14625,7 +14806,7 @@ class AutotagSettingTab extends PluginSettingTab {
             "Fix": "wrench",
             "AI Setup": "cpu",
             "AI Tags": "sparkles",
-            "AI - Image Analysis": "image",
+            "AI Description - Image Analysis": "image",
             "AI Tags - Tag Model": "cpu",
             "AI Input": "list-filter",
             "Image Description": "file-text",
@@ -15254,6 +15435,9 @@ class AutotagSettingTab extends PluginSettingTab {
 
         if (!(baseFolder instanceof TFolder)) lines.push(`Base Path for Watched Files is missing: ${basePath}. Set it to the folder where new source files arrive.`);
         if (!(noteFolder instanceof TFolder)) lines.push(`Companion Note Folder is missing: ${notePath}. Set it to the folder where companion notes are created.`);
+        if (!this.plugin.hasCompanionNoteSourceNameToken()) {
+            lines.push("Companion Note Name Format needs a {{name}} or {{filename}} token so each generated note keeps a source-specific name.");
+        }
         return lines;
     }
 
@@ -15404,10 +15588,11 @@ class AutotagSettingTab extends PluginSettingTab {
     getSetupHealthChecks(baseFolder: unknown, noteFolder: unknown, exampleNoteName: string): HealthDashboardCheck[] {
         const baseExists = baseFolder instanceof TFolder;
         const noteExists = noteFolder instanceof TFolder;
+        const hasSourceNameToken = this.plugin.hasCompanionNoteSourceNameToken();
         return [
             { tone: baseExists ? "success" : "danger", text: "Source folder exists" },
             { tone: noteExists ? "success" : "danger", text: "Companion note folder exists" },
-            { tone: exampleNoteName ? "success" : "danger", text: `Example note name: ${exampleNoteName || "No filename"}` },
+            { tone: exampleNoteName && hasSourceNameToken ? "success" : "danger", text: `Example note name: ${exampleNoteName || "No filename"}` },
         ];
     }
 
@@ -15415,6 +15600,7 @@ class AutotagSettingTab extends PluginSettingTab {
         if (tone === "success") return "circle-check";
         if (tone === "warning") return "triangle-alert";
         if (tone === "danger") return "circle-x";
+        if (tone === "optional") return "circle-minus";
         if (tone === "accent" || tone === "spinner") return "loader-circle";
         return "circle";
     }
@@ -15499,7 +15685,7 @@ class AutotagSettingTab extends PluginSettingTab {
                 ? "autotag-failed-files-warning"
                 : recoverUnprocessedBaseFileCount > 0 ? "autotag-unprocessed-files-warning" : undefined;
         const setupCheck = this.getHealthCheckFallback("setup-paths", "Setup - Companion Paths");
-        const imageAnalysisCheck = this.getHealthCheckFallback("image-analysis", "AI - Image Analysis");
+        const imageAnalysisCheck = this.getHealthCheckFallback("image-analysis", "AI Description - Image Analysis");
         const ollamaCheck = this.getHealthCheckFallback("ai-ollama", "AI Tags - Tag Model");
         const geocodeCheck = this.getHealthCheckFallback("geolocation-geocode", "Geolocation Tags - Reverse Geocode");
 
@@ -15525,7 +15711,7 @@ class AutotagSettingTab extends PluginSettingTab {
                 value: this.plugin.settings.useFolderTags ? "On" : "Off",
                 description: "",
                 checks: [
-                    { tone: this.plugin.settings.useFolderTags ? "success" : "neutral", text: this.plugin.settings.useFolderTags ? "Folder Tags enabled" : "Folder Tags disabled" },
+                    { tone: this.plugin.settings.useFolderTags ? "success" : "optional", text: this.plugin.settings.useFolderTags ? "Folder Tags enabled" : "Folder Tags disabled" },
                     { tone: folderMappingCount > 0 ? "success" : "neutral", text: `${folderMappingCount} folder propert${folderMappingCount === 1 ? "y" : "ies"} configured` },
                     { tone: this.plugin.settings.folderFallbackProperty ? "success" : "neutral", text: `Fallback property: ${this.plugin.settings.folderFallbackProperty || DEFAULT_SETTINGS.folderFallbackProperty}` },
                 ],
@@ -15533,7 +15719,7 @@ class AutotagSettingTab extends PluginSettingTab {
             },
             {
                 id: "image-analysis",
-                label: "AI - Image Analysis",
+                label: "AI Description - Image Analysis",
                 icon: this.getSettingsSectionIcon("ai-tags"),
                 targetSectionId: "ai-tags",
                 solutionAnchorId: imageAnalysisProblemLines.length > 0 ? "autotag-image-analysis-warning" : undefined,
@@ -15605,9 +15791,9 @@ class AutotagSettingTab extends PluginSettingTab {
                     : this.plugin.settings.vaultAwarenessEnabled ? `${vocabularyCount} known` : "Off",
                 description: "",
                 checks: [
-                    { tone: this.plugin.settings.vaultAwarenessEnabled ? "success" : "neutral", text: this.plugin.settings.vaultAwarenessEnabled ? "Vault Awareness enabled" : "Vault Awareness disabled" },
+                    { tone: this.plugin.settings.vaultAwarenessEnabled ? "success" : "optional", text: this.plugin.settings.vaultAwarenessEnabled ? "Vault Awareness enabled" : "Vault Awareness disabled" },
                     ...(vaultAwarenessProblemLines.length > 0 ? [{ tone: "warning" as const, text: "AI Tagging is required" }] : []),
-                    { tone: adaptiveVaultMatchingActive ? "success" : "neutral", text: adaptiveVaultMatchingActive ? "Adaptive Vault Matching enabled" : "Adaptive Vault Matching disabled" },
+                    { tone: adaptiveVaultMatchingActive ? "success" : "optional", text: adaptiveVaultMatchingActive ? "Adaptive Vault Matching enabled" : "Adaptive Vault Matching disabled" },
                     { tone: vaultCandidateProperties.length > 0 ? "success" : "neutral", text: `${vaultCandidateProperties.length} candidate propert${vaultCandidateProperties.length === 1 ? "y" : "ies"}` },
                     { tone: vocabularyCount > 0 ? "success" : "neutral", text: `${vocabularyCount} known term${vocabularyCount === 1 ? "" : "s"}` },
                 ],
@@ -15625,8 +15811,8 @@ class AutotagSettingTab extends PluginSettingTab {
                 description: "",
                 checks: [
                     ...(bridgeProblemLines.length > 0 ? [{ tone: "warning" as const, text: "Input dependency needs attention" }] : []),
-                    { tone: bridgeEvidenceActive ? "success" : "neutral", text: bridgeEvidenceActive ? "Evidence-aware rules enabled" : "Evidence-aware rules disabled" },
-                    { tone: bridgeDirectActive ? "success" : "neutral", text: bridgeDirectActive ? "Direct expansion rules enabled" : "Direct expansion rules disabled" },
+                    { tone: bridgeEvidenceActive ? "success" : "optional", text: bridgeEvidenceActive ? "Evidence-aware rules enabled" : "Evidence-aware rules disabled" },
+                    { tone: bridgeDirectActive ? "success" : "optional", text: bridgeDirectActive ? "Direct expansion rules enabled" : "Direct expansion rules disabled" },
                     { tone: bridgeRuleCount > 0 ? "success" : "neutral", text: `${bridgeRuleCount} evidence-aware rule${bridgeRuleCount === 1 ? "" : "s"}` },
                     { tone: enrichmentRuleCount > 0 ? "success" : "neutral", text: `${enrichmentRuleCount} direct expansion rule${enrichmentRuleCount === 1 ? "" : "s"}` },
                 ],
@@ -15656,7 +15842,7 @@ class AutotagSettingTab extends PluginSettingTab {
                 value: duplicateProtectionActive ? "Watching" : "Off",
                 description: "",
                 checks: [
-                    { tone: duplicateProtectionActive ? "success" : "neutral", text: duplicateProtectionActive ? "Duplicate Protection enabled" : "Duplicate Protection disabled" },
+                    { tone: duplicateProtectionActive ? "success" : "optional", text: duplicateProtectionActive ? "Duplicate Protection enabled" : "Duplicate Protection disabled" },
                     { tone: duplicateAttentionCount > 0 ? "danger" : "success", text: `${duplicateAttentionCount} item${duplicateAttentionCount === 1 ? "" : "s"} may need attention` },
                     { tone: "neutral", text: `${this.plugin.getPairRecords().length} pair${this.plugin.getPairRecords().length === 1 ? "" : "s"} tracked` },
                 ],
@@ -15843,11 +16029,14 @@ class AutotagSettingTab extends PluginSettingTab {
 
         if (!(baseFolder instanceof TFolder)) issues.push(`Base Path not found: ${basePath}`);
         if (!(noteFolder instanceof TFolder)) issues.push(`Companion Note Folder not found: ${notePath}`);
+        const hasSourceNameToken = this.plugin.hasCompanionNoteSourceNameToken();
+        if (!hasSourceNameToken) issues.push("Companion Note Name Format needs {{name}} or {{filename}}");
 
         const exampleNoteName = this.plugin.renderCompanionNoteNameFormatFromParts("Example.jpg", `${basePath}/Example.jpg`, "jpg");
         const checks = this.getSetupHealthChecks(baseFolder, noteFolder, exampleNoteName);
         if (issues.length > 0) {
-            return { tone: "danger", value: "Missing", message: "", checks };
+            const missingFolder = !(baseFolder instanceof TFolder) || !(noteFolder instanceof TFolder);
+            return { tone: "danger", value: missingFolder ? "Missing" : "Needs name", message: "", checks };
         }
         return { tone: "success", value: "Ready", message: "", checks };
     }
@@ -15858,7 +16047,7 @@ class AutotagSettingTab extends PluginSettingTab {
                 tone: "neutral",
                 value: "Off",
                 message: "",
-                checks: [{ tone: "neutral", text: "Image Analysis disabled" }],
+                checks: [{ tone: "optional", text: "Image Analysis disabled" }],
             };
         }
 
@@ -15921,7 +16110,7 @@ class AutotagSettingTab extends PluginSettingTab {
                 tone: "neutral",
                 value: "Off",
                 message: "",
-                checks: [{ tone: "neutral", text: "AI Tagging disabled" }],
+                checks: [{ tone: "optional", text: "AI Tagging disabled" }],
             };
         }
         const selectedModel = this.plugin.settings.ollamaModel.trim() || DEFAULT_SETTINGS.ollamaModel;
@@ -15982,7 +16171,7 @@ class AutotagSettingTab extends PluginSettingTab {
                 tone: "neutral",
                 value: "Off",
                 message: "",
-                checks: [{ tone: "neutral", text: "Reverse geocode provider selected" }],
+                checks: [{ tone: "optional", text: "Reverse geocoding disabled" }],
             };
         }
         const data = await this.plugin.reverseGeocode({ latitude: 52.52, longitude: 13.405 });
@@ -16006,7 +16195,7 @@ class AutotagSettingTab extends PluginSettingTab {
             checks: [
                 { tone: "success", text: "Reverse geocode provider selected" },
                 { tone: "success", text: `${providerName}: ${location}` },
-                { tone: this.plugin.settings.geolocationEnabled ? "success" : "neutral", text: this.plugin.settings.geolocationEnabled ? "Geolocation Tags enabled" : "Geolocation Tags disabled" },
+                { tone: this.plugin.settings.geolocationEnabled ? "success" : "optional", text: this.plugin.settings.geolocationEnabled ? "Geolocation Tags enabled" : "Geolocation Tags disabled" },
             ],
         };
     }
@@ -17340,10 +17529,10 @@ class AutotagSettingTab extends PluginSettingTab {
         this.renderProblemWarningPanel(
             containerEl,
             "autotag-setup-path-warning",
-            "Setup path attention",
+            "Setup attention",
             this.getSetupProblemWarningLines(),
             "warning",
-            "Autotag needs the source and companion-note folders before processing can run reliably."
+            "Autotag needs valid source and companion-note folders plus a {{name}} or {{filename}} token for reliable companion-note creation."
         );
 
         // Base path

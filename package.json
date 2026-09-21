@@ -1,6 +1,6 @@
 {
 	"name": "autotag",
-	"version": "0.1.1",
+	"version": "0.1.2",
 	"description": "Create and enrich companion notes for files using folder tags, AI tags, geolocation, duplicate protection, and recovery tools.",
 	"main": "main.js",
 	"scripts": {
