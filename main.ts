@@ -18609,7 +18609,7 @@ class AutotagSettingTab extends PluginSettingTab {
             this.renderSoftWarningPanel(
                 aiHowHostEl,
                 "Local AI can take longer",
-                "Using local vision or tagging models can significantly increase file generation time, potentially up to 1 minute per file depending on your computer and selected models."
+                "Local vision and tagging models can significantly increase file generation time. Screen recording, gaming, rendering, and other GPU-heavy work can make processing take much longer because it competes with Ollama for GPU processing, VRAM, memory bandwidth, and shared system memory. If VRAM becomes constrained, Ollama may move model data between RAM and VRAM or run part of the workload on the CPU; stopping the competing task can let an in-progress file finish quickly."
             );
         };
         renderAiHow();
@@ -18983,7 +18983,10 @@ class AutotagSettingTab extends PluginSettingTab {
                     selfLearningEnabledWarningHostEl,
                     "Adaptive matching can change Vault Awareness output",
                     this.plugin.settings.selfLearningBridgeEnabled
-                        ? ["Adaptive Vault Matching learns and reuses wording relationships. Incorrect relationships can cause false positives across later files, so review learned relationships and use the confidence threshold deliberately."]
+                        ? [
+                            "Adaptive Vault Matching learns and reuses wording relationships. Incorrect relationships can cause false positives across later files, so review learned relationships and use the confidence threshold deliberately.",
+                            "Adaptive matching may add local AI checks to the tagging pass. Screen recording and other GPU-heavy work can compete with Ollama for GPU processing, VRAM, memory bandwidth, and shared system memory, potentially causing CPU fallback or model swapping and making a file take several minutes.",
+                        ]
                         : [],
                     this.getSettingsSectionIcon("bridge")
                 );
