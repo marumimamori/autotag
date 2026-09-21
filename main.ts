@@ -87,6 +87,21 @@ type FolderPropertyMapping = {
     useAsVaultCandidate: boolean;
 };
 
+type AdditionalVaultVocabularyProperty = {
+    id: string;
+    property: string;
+    useAsVaultCandidate: boolean;
+};
+
+type VaultVocabularySourceBinding = {
+    key: string;
+    property: string;
+    enabled: boolean;
+    label: string;
+    sectionId: string;
+    anchorId: string;
+};
+
 type GeolocationProvider = "disabled" | "public-nominatim" | "local-nominatim";
 type GeolocationField = "latitude" | "longitude" | "altitude" | "country" | "region" | "county" | "city" | "suburb" | "road" | "postcode" | "houseNumber" | "address" | "displayName";
 
@@ -95,6 +110,7 @@ type GeolocationPropertyMapping = {
     field: GeolocationField;
     property: string;
     format: string;
+    useAsVaultCandidate: boolean;
 };
 
 type PendingGeocodeJob = {
@@ -137,6 +153,16 @@ type TemplatePropertySuggestionRefs = {
     listEl: HTMLElement;
     cleanTextEl: HTMLElement;
     copyButtonEl: HTMLButtonElement;
+};
+
+type VaultVocabularyToggleControl = {
+    getProperty: () => string;
+    setValue: (value: boolean) => unknown;
+    value: boolean;
+    warningHostEl?: HTMLElement;
+    renderWarning?: () => void;
+    getWarningSignature?: () => string;
+    warningSignature?: string;
 };
 
 type ProgressNoticeController = {
@@ -188,6 +214,7 @@ type ExpensiveHealthCounts = {
     duplicateUnhashedFileCount: number;
     duplicateUnpairedFileCount: number;
     recoverUnprocessedBaseFileCount: number;
+    recoverMissingCompanionCount: number;
 };
 
 type GpsCoordinates = {
@@ -297,6 +324,12 @@ const DEFAULT_OLLAMA_VISION_PROMPT = [
     "Return only the description text.",
 ].join(" ");
 
+const DEFAULT_FILENAME_STOP_WORDS = [
+    "a", "an", "and", "are", "as", "at", "by", "for", "from", "in", "into", "is",
+    "of", "on", "or", "the", "to", "with", "without", "und", "oder", "der", "die", "das",
+    "ein", "eine", "einer", "eines", "mit", "von", "zu", "im", "am",
+];
+
 type LinguisticFeatureSettings = {
     synonyms: LinguisticFeatureMode;
     grammaticalVariants: LinguisticFeatureMode;
@@ -352,8 +385,11 @@ type LearnedVaultRelation = {
     relationType: string;
     model: string;
     confidence: number;
+    modelConfidence?: number;
     pinned: boolean;
     confirmations: number;
+    evidenceChannels?: VaultEvidenceChannel[];
+    confirmationFileKeys?: string[];
     createdAt: number;
     lastConfirmedAt: number;
     lastUsedAt: number;
@@ -364,6 +400,19 @@ type RejectedVaultRelation = {
     candidate: string;
     model: string;
     rejectedAt: number;
+    lastSeenAt: number;
+};
+
+type LearnedFilenameStopWordStatus = "provisional" | "accepted" | "rejected";
+
+type LearnedFilenameStopWord = {
+    word: string;
+    confidence: number;
+    modelConfidence: number;
+    status: LearnedFilenameStopWordStatus;
+    confirmationFileKeys: string[];
+    model: string;
+    createdAt: number;
     lastSeenAt: number;
 };
 
@@ -399,7 +448,15 @@ type VaultCandidateSelection = {
     id: string;
     evidence: string;
     relationType: string;
+    verdict: "same-concept" | "broader-narrower" | "related-only" | "unrelated";
+    safeToApply: boolean;
     confidence?: number;
+};
+
+type VaultCandidateReview = {
+    selections: VaultCandidateSelection[];
+    rejectedIds: string[];
+    complete: boolean;
 };
 
 type LocalStructuralRelation = {
@@ -460,9 +517,10 @@ interface AutotagSettings {
     aiTagsFormat: string; // Formatting template for AI-generated tags
     removeFolderTagsFromAiTags: boolean; // Remove folder-tag values before writing AI tags
     removeGeolocationFromAiTags: boolean; // Remove known geolocation terms before writing AI tags
-    aiTagsUseAsVaultCandidate: boolean; // Use AI-generated tags as vault-awareness candidates
+    aiTagsUseAsVaultCandidate: boolean; // Add AI tags saved in existing notes to the vault-awareness vocabulary
     aiDescriptionPropertyEnabled: boolean; // Write AI-generated description property
     aiDescriptionPropertyName: string; // Property name for AI-generated description
+    aiDescriptionUseAsVaultCandidate: boolean; // Add saved AI descriptions to the vault-awareness vocabulary
     useGeolocationForAiDescription: boolean; // Use known geolocation metadata to improve AI descriptions
     useGeolocationForAiTags: boolean; // Use known geolocation metadata as AI tag evidence
     imageAnalysisEnabled: boolean; // Use local Ollama vision to create image descriptions
@@ -477,11 +535,13 @@ interface AutotagSettings {
     protectedJobs: ProtectedProcessingJob[]; // Persisted queue/resume checkpoints
     folderPropertyMappings: FolderPropertyMapping[]; // Folder names mapped to custom frontmatter properties
     folderPropertyManualValueMemory: Record<string, string[]>; // Remember manual folder values by property name
+    folderFallbackEnabled: boolean; // Write unmatched folder names to the fallback property
     folderFallbackProperty: string; // Frontmatter property for folder names not matched by property lists
     folderFallbackFormat: string; // Formatting template for fallback folder values
     folderFallbackAiCandidateMode: CandidateMode; // How fallback folder values contribute to AI tags
     folderFallbackUseAsAiCandidate: boolean; // Use fallback folder values as AI candidates
     folderFallbackUseAsVaultCandidate: boolean; // Use fallback folder property as a vault-awareness candidate
+    additionalVaultVocabularyProperties: AdditionalVaultVocabularyProperty[]; // Additional frontmatter properties scanned as vault-awareness vocabulary
     useFolderTags: boolean; // Use folder names for frontmatter values
     templateSource: TemplateSource; // Where the base note template comes from
     frontmatterTemplate: string; // Template for generated companion note frontmatter
@@ -490,7 +550,8 @@ interface AutotagSettings {
     geolocationEnabled: boolean; // Read GPS metadata and write configured geolocation properties
     geolocationProvider: GeolocationProvider; // Reverse geocoding provider
     geolocationLocalUrl: string; // Local Nominatim endpoint
-    geolocationProperties: GeolocationPropertyMapping[]; // Geolocation output fields mapped to properties
+    geolocationResultLanguage: string; // Preferred Nominatim result language or Accept-Language preference
+    geolocationProperties: GeolocationPropertyMapping[]; // Geolocation output fields mapped to properties and VA vocabulary state
     geocodeCache: Record<string, GeocodeCacheEntry>; // Cached reverse geocode results
     pendingGeocodeJobs: PendingGeocodeJob[]; // Persisted reverse geocode queue
     geocodePublicDay: string; // Day key for public Nominatim cap
@@ -500,7 +561,7 @@ interface AutotagSettings {
     bridgeRules: string; // Shared manual concept expansion rules for both Bridge engines
     bridgeEnabled: boolean; // Apply manual bridge enrichment rules
     manualEnrichmentEnabled: boolean; // Expand generated tags through direct manual enrichment rules
-    selfLearningBridgeEnabled: boolean; // Learn and reuse structural or semantic relationships between AI evidence and VA vocabulary
+    selfLearningBridgeEnabled: boolean; // Enable adaptive learned, structural, and semantic matching against VA vocabulary
     bridgeUseAiInput: boolean; // Allow Bridge rules to use AI description and accepted AI tags
     bridgeUseFilenameInput: boolean; // Allow Bridge rules to use filename candidates
     bridgeUseFolderInput: boolean; // Allow Bridge rules to use folder-tag candidates
@@ -512,13 +573,17 @@ interface AutotagSettings {
     excludedVocabularyTerms: string[]; // Terms excluded from vault candidate vocabulary
     filenameCandidateMode: CandidateMode; // How image filenames contribute to AI tags
     filenameCandidatesHumanReadableOnly: boolean; // Ignore camera/hash/date-style filenames before using filename candidates
+    filenameFillerWordsEnabled: boolean; // Discard built-in and learned filename filler words
+    learnedFilenameStopWords: LearnedFilenameStopWord[]; // Vault-local filename filler words proposed through the AI tag pass
     maxPromptVocabularyTerms: number; // Max vault vocabulary candidates sent to Ollama
     vaultAwarenessEnabled: boolean; // Add known vault vocabulary after base AI tagging
     maxVaultAwareAdditions: number; // Max known vault concepts added by vault awareness
     vaultAwarenessOutputEnabled: boolean; // Write Vault Awareness additions to a separate property
     vaultAwarenessOutputPropertyName: string; // Property name for separate Vault Awareness additions
+    vaultAwarenessOutputUseAsVaultCandidate: boolean; // Add separate Vault Awareness output values to the vault-awareness vocabulary
     vaultAwarenessOutputFormat: string; // Formatting template for separate Vault Awareness additions
     vaultAwarenessOutputExclusive: boolean; // Keep Vault Awareness additions out of AI tags when writing separately
+    vaultAwarenessPreserveOriginalAiTags: boolean; // Keep source AI wording alongside recognized vault wording
     vaultLinguisticFeatures: LinguisticFeatureSettings;
     hideVaultLinguisticFeatures: boolean;
     learnedVaultRelations: LearnedVaultRelation[]; // Vault-local relationships confirmed structurally or by the Vault Awareness model
@@ -587,6 +652,7 @@ const DEFAULT_SETTINGS: AutotagSettings = {
     aiTagsUseAsVaultCandidate: false,
     aiDescriptionPropertyEnabled: true,
     aiDescriptionPropertyName: 'aiDescription',
+    aiDescriptionUseAsVaultCandidate: false,
     useGeolocationForAiDescription: true,
     useGeolocationForAiTags: true,
     imageAnalysisEnabled: true,
@@ -596,7 +662,7 @@ const DEFAULT_SETTINGS: AutotagSettings = {
     processedFiles: [],
     failedFiles: [],
     shutdownProtectionEnabled: true,
-    autoProcessUnprocessedOnReload: true,
+    autoProcessUnprocessedOnReload: false,
     deleteLinkedFilePair: true,
     protectedJobs: [],
     folderPropertyMappings: [
@@ -607,12 +673,14 @@ const DEFAULT_SETTINGS: AutotagSettings = {
         types: [],
         tags: [],
     },
+    folderFallbackEnabled: false,
     folderFallbackProperty: 'autotag-fallback',
     folderFallbackFormat: '',
     folderFallbackAiCandidateMode: 'all',
     folderFallbackUseAsAiCandidate: true,
     folderFallbackUseAsVaultCandidate: false,
-    useFolderTags: true,
+    additionalVaultVocabularyProperties: [],
+    useFolderTags: false,
     templateSource: 'internal',
     frontmatterTemplate: [
         'links:',
@@ -627,22 +695,23 @@ const DEFAULT_SETTINGS: AutotagSettings = {
     ].join('\n'),
     templateFilePath: 'Tools/Templates/Tem-Autotag.md',
     writeImageEmbedInBody: true,
-    geolocationEnabled: true,
+    geolocationEnabled: false,
     geolocationProvider: 'public-nominatim',
     geolocationLocalUrl: 'http://127.0.0.1:8080',
+    geolocationResultLanguage: 'English (en)',
     geolocationProperties: [
-        { id: 'latitude', field: 'country', property: 'country', format: '' },
-        { id: 'city', field: 'city', property: 'city', format: '' },
+        { id: 'latitude', field: 'country', property: 'country', format: '', useAsVaultCandidate: false },
+        { id: 'city', field: 'city', property: 'city', format: '', useAsVaultCandidate: false },
     ],
     geocodeCache: {},
     pendingGeocodeJobs: [],
     geocodePublicDay: '',
     geocodePublicRequestsToday: 0,
     geocodeLastRequestAt: 0,
-    aiTaggingEnabled: true,
-    bridgeRules: 'House => Architecture',
-    bridgeEnabled: true,
-    manualEnrichmentEnabled: true,
+    aiTaggingEnabled: false,
+    bridgeRules: '',
+    bridgeEnabled: false,
+    manualEnrichmentEnabled: false,
     selfLearningBridgeEnabled: true,
     bridgeUseAiInput: true,
     bridgeUseFilenameInput: true,
@@ -663,13 +732,17 @@ const DEFAULT_SETTINGS: AutotagSettings = {
     excludedVocabularyTerms: ['Ata'],
     filenameCandidateMode: 'all',
     filenameCandidatesHumanReadableOnly: true,
+    filenameFillerWordsEnabled: true,
+    learnedFilenameStopWords: [],
     maxPromptVocabularyTerms: 20,
-    vaultAwarenessEnabled: true,
+    vaultAwarenessEnabled: false,
     maxVaultAwareAdditions: 20,
     vaultAwarenessOutputEnabled: false,
     vaultAwarenessOutputPropertyName: 'vaulttags',
+    vaultAwarenessOutputUseAsVaultCandidate: false,
     vaultAwarenessOutputFormat: '',
     vaultAwarenessOutputExclusive: false,
+    vaultAwarenessPreserveOriginalAiTags: true,
     vaultLinguisticFeatures: {
         synonyms: 'use',
         grammaticalVariants: 'use',
@@ -752,6 +825,7 @@ const BUILTIN_DEV_PROFILE_SETTINGS: Partial<AutotagSettings> = {
     aiTagsUseAsVaultCandidate: false,
     aiDescriptionPropertyEnabled: true,
     aiDescriptionPropertyName: "aiDescription",
+    aiDescriptionUseAsVaultCandidate: false,
     useGeolocationForAiDescription: true,
     useGeolocationForAiTags: true,
     ollamaVisionModel: "llava-llama3",
@@ -822,11 +896,13 @@ const BUILTIN_DEV_PROFILE_SETTINGS: Partial<AutotagSettings> = {
         georegion: [],
         geocity: [],
     },
+    folderFallbackEnabled: true,
     folderFallbackProperty: "domains",
     folderFallbackFormat: "[[Example]]",
     folderFallbackAiCandidateMode: "all",
     folderFallbackUseAsAiCandidate: true,
     folderFallbackUseAsVaultCandidate: true,
+    additionalVaultVocabularyProperties: [],
     useFolderTags: true,
     templateSource: "internal",
     frontmatterTemplate: "domains:\ntypes:\n- Ata\nrelated:\ncurrentStatus:\nlinktofile: \nfiletype: \nembed: \nlastModified:\ncreated:\naiDomains:\naiDescription: \ngeoCountry:\ngeoRegion:\ngeoCity:\n",
@@ -835,24 +911,28 @@ const BUILTIN_DEV_PROFILE_SETTINGS: Partial<AutotagSettings> = {
     geolocationEnabled: true,
     geolocationProvider: "public-nominatim",
     geolocationLocalUrl: "http://127.0.0.1:8080",
+    geolocationResultLanguage: "English (en)",
     geolocationProperties: [
         {
             id: "country",
             field: "country",
             property: "geoCountry",
             format: "[[Example]]",
+            useAsVaultCandidate: false,
         },
         {
             id: "1788715546405-e5u230ozo5v",
             field: "region",
             property: "geoRegion",
             format: "[[Example]]",
+            useAsVaultCandidate: false,
         },
         {
             id: "1788715558589-whq5cb38pp",
             field: "city",
             property: "geoCity",
             format: "[[Example]]",
+            useAsVaultCandidate: false,
         },
     ],
     aiTaggingEnabled: true,
@@ -878,13 +958,16 @@ const BUILTIN_DEV_PROFILE_SETTINGS: Partial<AutotagSettings> = {
     excludedVocabularyTerms: ["Ata"],
     filenameCandidateMode: "all",
     filenameCandidatesHumanReadableOnly: true,
+    filenameFillerWordsEnabled: true,
     maxPromptVocabularyTerms: 20,
     vaultAwarenessEnabled: true,
     maxVaultAwareAdditions: 20,
     vaultAwarenessOutputEnabled: true,
     vaultAwarenessOutputPropertyName: "domains",
+    vaultAwarenessOutputUseAsVaultCandidate: true,
     vaultAwarenessOutputFormat: "[[Example]]",
     vaultAwarenessOutputExclusive: false,
+    vaultAwarenessPreserveOriginalAiTags: true,
     vaultLinguisticFeatures: {
         synonyms: "use",
         grammaticalVariants: "use",
@@ -951,21 +1034,25 @@ const BUILTIN_FEATURE_TEST_PROFILE_SETTINGS: Partial<AutotagSettings> = {
             field: "country",
             property: "customAndGeoCountry",
             format: "[[Example]]",
+            useAsVaultCandidate: false,
         },
         {
             id: "1788715546405-e5u230ozo5v",
             field: "region",
             property: "RegionAndCityOutputDifferentCustomFormats",
             format: "[[noFormat]]+ Example",
+            useAsVaultCandidate: false,
         },
         {
             id: "1788715558589-whq5cb38pp",
             field: "city",
             property: "RegionAndCityOutputDifferentCustomFormats",
             format: "[[Example]]",
+            useAsVaultCandidate: false,
         },
     ],
     vaultAwarenessOutputPropertyName: "vaultAwareness",
+    vaultAwarenessOutputUseAsVaultCandidate: false,
 };
 
 const SETTINGS_PROFILE_CONTROLLED_KEYS: (keyof AutotagSettings)[] = [
@@ -989,6 +1076,7 @@ const SETTINGS_PROFILE_CONTROLLED_KEYS: (keyof AutotagSettings)[] = [
     "aiTagsUseAsVaultCandidate",
     "aiDescriptionPropertyEnabled",
     "aiDescriptionPropertyName",
+    "aiDescriptionUseAsVaultCandidate",
     "useGeolocationForAiDescription",
     "useGeolocationForAiTags",
     "ollamaVisionModel",
@@ -999,11 +1087,13 @@ const SETTINGS_PROFILE_CONTROLLED_KEYS: (keyof AutotagSettings)[] = [
     "deleteLinkedFilePair",
     "folderPropertyMappings",
     "folderPropertyManualValueMemory",
+    "folderFallbackEnabled",
     "folderFallbackProperty",
     "folderFallbackFormat",
     "folderFallbackAiCandidateMode",
     "folderFallbackUseAsAiCandidate",
     "folderFallbackUseAsVaultCandidate",
+    "additionalVaultVocabularyProperties",
     "useFolderTags",
     "templateSource",
     "frontmatterTemplate",
@@ -1012,6 +1102,7 @@ const SETTINGS_PROFILE_CONTROLLED_KEYS: (keyof AutotagSettings)[] = [
     "geolocationEnabled",
     "geolocationProvider",
     "geolocationLocalUrl",
+    "geolocationResultLanguage",
     "geolocationProperties",
     "aiTaggingEnabled",
     "bridgeRules",
@@ -1028,13 +1119,16 @@ const SETTINGS_PROFILE_CONTROLLED_KEYS: (keyof AutotagSettings)[] = [
     "excludedVocabularyTerms",
     "filenameCandidateMode",
     "filenameCandidatesHumanReadableOnly",
+    "filenameFillerWordsEnabled",
     "maxPromptVocabularyTerms",
     "vaultAwarenessEnabled",
     "maxVaultAwareAdditions",
     "vaultAwarenessOutputEnabled",
     "vaultAwarenessOutputPropertyName",
+    "vaultAwarenessOutputUseAsVaultCandidate",
     "vaultAwarenessOutputFormat",
     "vaultAwarenessOutputExclusive",
+    "vaultAwarenessPreserveOriginalAiTags",
     "vaultLinguisticFeatures",
     "hideVaultLinguisticFeatures",
     "vaultMatchingTiers",
@@ -1111,6 +1205,51 @@ const GEOLOCATION_FIELD_OPTIONS: { field: GeolocationField; label: string; defau
     { field: "displayName", label: "Raw Provider Display Name", defaultProperty: "location-display" },
 ];
 
+const GEOLOCATION_LANGUAGE_OPTIONS: { name: string; code: string }[] = [
+    { name: "Arabic", code: "ar" },
+    { name: "Bulgarian", code: "bg" },
+    { name: "Catalan", code: "ca" },
+    { name: "Chinese (Simplified)", code: "zh-CN" },
+    { name: "Chinese (Traditional)", code: "zh-TW" },
+    { name: "Croatian", code: "hr" },
+    { name: "Czech", code: "cs" },
+    { name: "Danish", code: "da" },
+    { name: "Dutch", code: "nl" },
+    { name: "English", code: "en" },
+    { name: "Estonian", code: "et" },
+    { name: "Finnish", code: "fi" },
+    { name: "French", code: "fr" },
+    { name: "German", code: "de" },
+    { name: "Greek", code: "el" },
+    { name: "Hebrew", code: "he" },
+    { name: "Hindi", code: "hi" },
+    { name: "Hungarian", code: "hu" },
+    { name: "Icelandic", code: "is" },
+    { name: "Indonesian", code: "id" },
+    { name: "Irish", code: "ga" },
+    { name: "Italian", code: "it" },
+    { name: "Japanese", code: "ja" },
+    { name: "Korean", code: "ko" },
+    { name: "Latvian", code: "lv" },
+    { name: "Lithuanian", code: "lt" },
+    { name: "Norwegian", code: "no" },
+    { name: "Persian", code: "fa" },
+    { name: "Polish", code: "pl" },
+    { name: "Portuguese", code: "pt" },
+    { name: "Portuguese (Brazil)", code: "pt-BR" },
+    { name: "Romanian", code: "ro" },
+    { name: "Russian", code: "ru" },
+    { name: "Serbian", code: "sr" },
+    { name: "Slovak", code: "sk" },
+    { name: "Slovenian", code: "sl" },
+    { name: "Spanish", code: "es" },
+    { name: "Swedish", code: "sv" },
+    { name: "Thai", code: "th" },
+    { name: "Turkish", code: "tr" },
+    { name: "Ukrainian", code: "uk" },
+    { name: "Vietnamese", code: "vi" },
+];
+
 const LIMITED_FILE_TYPE_WARNINGS: LimitedFileTypeWarningDefinition[] = [
     { extension: "avif", label: "AVIF", description: "Modern compressed image. AI description and visual duplicate preview support depend on Obsidian, Electron, and the selected Ollama vision model." },
     { extension: "heic", label: "HEIC", description: "Apple/iPhone photo container. Autotag can create notes and exact hashes, but AI description, previews, and GPS parsing may depend on external support." },
@@ -1151,6 +1290,7 @@ export default class AutotagPlugin extends Plugin {
     deletionCascadePaths = new Set<string>();
     deletionSuppressedPaths = new Set<string>();
     deletionSuppressedRunIds = new Map<string, string | null>();
+    deletionSuppressionTimers = new Map<string, number>();
     currentRunIds = new Map<string, string>();
     activeRunPairs = new Map<string, ActiveRunPair>();
     pendingDuplicateActions = new Map<string, PendingDuplicateAction>();
@@ -1838,12 +1978,18 @@ export default class AutotagPlugin extends Plugin {
             return this.expensiveHealthCountsCache;
         }
 
+        const missingCompanionFiles = this.getMissingCompanionSourceFiles();
+        const missingCompanionPathKeys = new Set(missingCompanionFiles.map(file => this.getVaultPathKey(file.path)));
         const counts: ExpensiveHealthCounts = {
             updatedAt: now,
-            duplicateUnlinkedHashCount: this.getUnlinkedDuplicateRecords().length,
-            duplicateUnhashedFileCount: this.getUnhashedFiles().length,
-            duplicateUnpairedFileCount: this.getUnpairedFiles().length,
+            duplicateUnlinkedHashCount: this.getUnlinkedDuplicateRecords()
+                .filter(record => !missingCompanionPathKeys.has(this.getVaultPathKey(record.filePath))).length,
+            duplicateUnhashedFileCount: this.getUnhashedFiles()
+                .filter(file => !missingCompanionPathKeys.has(this.getVaultPathKey(file.path))).length,
+            duplicateUnpairedFileCount: this.getUnpairedFiles()
+                .filter(file => !missingCompanionPathKeys.has(this.getVaultPathKey(file.path))).length,
             recoverUnprocessedBaseFileCount: this.getUnprocessedBaseFiles().length,
+            recoverMissingCompanionCount: missingCompanionFiles.length,
         };
         this.expensiveHealthCountsCache = counts;
         return counts;
@@ -1920,6 +2066,14 @@ export default class AutotagPlugin extends Plugin {
             .filter(file => this.isPathInBasePath(file.path))
             .filter(file => file.extension.toLowerCase() !== "md")
             .sort((a, b) => a.path.localeCompare(b.path));
+    }
+
+    getMissingCompanionSourceFiles(): TFile[] {
+        const pendingPaths = this.getPendingHealthPathKeys();
+        return this.getManualPairImageFiles().filter(file =>
+            !this.isPathPendingHealthEvaluation(file.path, pendingPaths)
+            && !(this.findCompanionNoteForSourceFile(file) instanceof TFile)
+        );
     }
 
     getManualPairNoteFiles(): TFile[] {
@@ -2879,6 +3033,16 @@ export default class AutotagPlugin extends Plugin {
     suppressDeletedPath(path: string, runId: string | null = this.getPathKeyValue(this.currentRunIds, path) ?? null): void {
         this.deletionSuppressedPaths.add(path);
         this.deletionSuppressedRunIds.set(path, runId);
+        const pathKey = this.getVaultPathKey(path);
+        const existingTimer = this.deletionSuppressionTimers.get(pathKey);
+        if (existingTimer !== undefined) window.clearTimeout(existingTimer);
+        const timer = window.setTimeout(() => {
+            if (this.deletionSuppressionTimers.get(pathKey) !== timer) return;
+            this.deletionSuppressionTimers.delete(pathKey);
+            this.deletePathFromSet(this.deletionSuppressedPaths, path);
+            this.deletePathKey(this.deletionSuppressedRunIds, path);
+        }, 5000);
+        this.deletionSuppressionTimers.set(pathKey, timer);
     }
 
     isDeletionSuppressed(path: string, runId?: string): boolean {
@@ -2889,6 +3053,12 @@ export default class AutotagPlugin extends Plugin {
     }
 
     clearDeletionSuppression(path: string): void {
+        const pathKey = this.getVaultPathKey(path);
+        const timer = this.deletionSuppressionTimers.get(pathKey);
+        if (timer !== undefined) {
+            window.clearTimeout(timer);
+            this.deletionSuppressionTimers.delete(pathKey);
+        }
         this.deletePathFromSet(this.deletionSuppressedPaths, path);
         this.deletePathKey(this.deletionSuppressedRunIds, path);
     }
@@ -3530,9 +3700,13 @@ export default class AutotagPlugin extends Plugin {
 
     getFrontmatterListValue(frontmatter: Record<string, unknown>, keys: string[]): string[] {
         const values: string[] = [];
+        const frontmatterKeys = Object.keys(frontmatter);
 
         for (const key of keys) {
-            const rawValue = frontmatter[key];
+            const resolvedKey = Object.prototype.hasOwnProperty.call(frontmatter, key)
+                ? key
+                : frontmatterKeys.find(candidate => candidate.toLowerCase() === key.toLowerCase());
+            const rawValue = resolvedKey ? frontmatter[resolvedKey] : undefined;
             if (Array.isArray(rawValue)) {
                 rawValue.forEach(item => {
                     if (typeof item === "string") values.push(item);
@@ -3637,11 +3811,16 @@ export default class AutotagPlugin extends Plugin {
         return true;
     }
 
-    async syncAutomaticFolderPropertyMappings(replaceValues = true): Promise<void> {
+    refreshAutomaticFolderPropertyMappings(replaceValues = true): boolean {
         let changed = false;
         this.settings.folderPropertyMappings.forEach(mapping => {
             if (this.syncAutomaticFolderPropertyMapping(mapping, replaceValues)) changed = true;
         });
+        return changed;
+    }
+
+    async syncAutomaticFolderPropertyMappings(replaceValues = true): Promise<void> {
+        const changed = this.refreshAutomaticFolderPropertyMappings(replaceValues);
         if (changed) {
             await this.saveSettings();
             this.settingTab?.refreshFolderPropertyValuesIfVisible();
@@ -3665,24 +3844,147 @@ export default class AutotagPlugin extends Plugin {
     }
 
     getVaultAwarenessCandidateProperties(): string[] {
-        const properties = new Set<string>();
-        this.getFolderPropertyMappings().forEach(mapping => {
-            if (!mapping.useAsVaultCandidate) return;
-            const property = this.normalizeFolderFallbackProperty(mapping.property);
-            if (property) properties.add(property);
+        const properties = new Map<string, string>();
+        const add = (property: string) => {
+            const normalized = this.normalizePropertyName(property, "");
+            const key = normalized.toLowerCase();
+            if (normalized && !properties.has(key)) properties.set(key, normalized);
+        };
+        this.getVaultVocabularySourceBindings().forEach(binding => {
+            if (binding.enabled) add(binding.property);
         });
 
-        if (this.settings.folderFallbackUseAsVaultCandidate) {
-            const fallbackProperty = this.normalizeFolderFallbackProperty(this.settings.folderFallbackProperty);
-            if (fallbackProperty) properties.add(fallbackProperty);
-        }
+        return Array.from(properties.values()).sort((a, b) => a.localeCompare(b));
+    }
 
-        if (this.settings.aiTagsUseAsVaultCandidate) {
-            const aiTagsProperty = this.getAiTagsPropertyName();
-            if (aiTagsProperty) properties.add(aiTagsProperty);
-        }
+    getVaultVocabularySourceBindings(): VaultVocabularySourceBinding[] {
+        const bindings: VaultVocabularySourceBinding[] = [];
+        this.getFolderPropertyMappings().forEach((mapping, index) => bindings.push({
+            key: `folder:${mapping.id}`,
+            property: this.normalizeFolderFallbackProperty(mapping.property),
+            enabled: mapping.useAsVaultCandidate,
+            label: `Folder Tags > Property ${index + 1}`,
+            sectionId: "folder-tags",
+            anchorId: `autotag-folder-property-${mapping.id}`,
+        }));
+        bindings.push({
+            key: "folder-fallback",
+            property: this.normalizeFolderFallbackProperty(this.settings.folderFallbackProperty),
+            enabled: this.settings.folderFallbackUseAsVaultCandidate,
+            label: "Folder Tags > Fallback",
+            sectionId: "folder-tags",
+            anchorId: "autotag-folder-fallback-property",
+        });
+        this.getGeolocationProperties().forEach((mapping, index) => bindings.push({
+            key: `geolocation:${mapping.id}`,
+            property: this.normalizePropertyName(mapping.property, this.getDefaultGeolocationPropertyName(mapping.field)),
+            enabled: mapping.useAsVaultCandidate,
+            label: `Geolocation Tags > Property ${index + 1}`,
+            sectionId: "geolocation",
+            anchorId: `autotag-geolocation-property-${mapping.id}`,
+        }));
+        bindings.push({
+            key: "ai-description",
+            property: this.getAiDescriptionPropertyName(),
+            enabled: this.settings.aiDescriptionUseAsVaultCandidate,
+            label: "AI Tags > Image description",
+            sectionId: "ai-tags",
+            anchorId: "autotag-ai-description-property",
+        });
+        bindings.push({
+            key: "ai-tags",
+            property: this.getAiTagsPropertyName(),
+            enabled: this.settings.aiTagsUseAsVaultCandidate,
+            label: "AI Tags > Generated tags",
+            sectionId: "ai-tags",
+            anchorId: "autotag-ai-tags-property",
+        });
+        bindings.push({
+            key: "vault-output",
+            property: this.getVaultAwarenessOutputPropertyName(),
+            enabled: this.settings.vaultAwarenessOutputUseAsVaultCandidate,
+            label: "Vault Awareness > Output",
+            sectionId: "vault-awareness",
+            anchorId: "autotag-vault-awareness-output-property",
+        });
+        this.settings.additionalVaultVocabularyProperties.forEach((source, index) => {
+            const property = this.normalizePropertyName(source.property, "");
+            if (!property) return;
+            bindings.push({
+                key: `additional:${source.id}`,
+                property,
+                enabled: source.useAsVaultCandidate,
+                label: `Vault Awareness > Vocabulary Source ${index + 1}`,
+                sectionId: "vault-awareness",
+                anchorId: `autotag-vault-vocabulary-source-${source.id}`,
+            });
+        });
+        return bindings;
+    }
 
-        return Array.from(properties).sort((a, b) => a.localeCompare(b));
+    setVaultVocabularyPropertyEnabled(property: string, enabled: boolean): boolean {
+        const propertyKey = this.normalizePropertyName(property, "").toLowerCase();
+        if (!propertyKey) return false;
+        let changed = false;
+        const update = (current: boolean, apply: () => void) => {
+            if (current === enabled) return;
+            apply();
+            changed = true;
+        };
+        this.settings.folderPropertyMappings.forEach(mapping => {
+            if (this.normalizeFolderFallbackProperty(mapping.property).toLowerCase() !== propertyKey) return;
+            update(mapping.useAsVaultCandidate, () => { mapping.useAsVaultCandidate = enabled; });
+        });
+        if (this.normalizeFolderFallbackProperty(this.settings.folderFallbackProperty).toLowerCase() === propertyKey) {
+            update(this.settings.folderFallbackUseAsVaultCandidate, () => { this.settings.folderFallbackUseAsVaultCandidate = enabled; });
+        }
+        this.settings.geolocationProperties.forEach(mapping => {
+            const mappingProperty = this.normalizePropertyName(mapping.property, this.getDefaultGeolocationPropertyName(mapping.field));
+            if (mappingProperty.toLowerCase() !== propertyKey) return;
+            update(mapping.useAsVaultCandidate, () => { mapping.useAsVaultCandidate = enabled; });
+        });
+        if (this.getAiDescriptionPropertyName().toLowerCase() === propertyKey) {
+            update(this.settings.aiDescriptionUseAsVaultCandidate, () => { this.settings.aiDescriptionUseAsVaultCandidate = enabled; });
+        }
+        if (this.getAiTagsPropertyName().toLowerCase() === propertyKey) {
+            update(this.settings.aiTagsUseAsVaultCandidate, () => { this.settings.aiTagsUseAsVaultCandidate = enabled; });
+        }
+        if (this.getVaultAwarenessOutputPropertyName().toLowerCase() === propertyKey) {
+            update(this.settings.vaultAwarenessOutputUseAsVaultCandidate, () => { this.settings.vaultAwarenessOutputUseAsVaultCandidate = enabled; });
+        }
+        this.settings.additionalVaultVocabularyProperties.forEach(source => {
+            if (this.normalizePropertyName(source.property, "").toLowerCase() !== propertyKey) return;
+            update(source.useAsVaultCandidate, () => { source.useAsVaultCandidate = enabled; });
+        });
+        return changed;
+    }
+
+    isVaultVocabularyPropertyEnabled(property: string): boolean {
+        const propertyKey = this.normalizePropertyName(property, "").toLowerCase();
+        if (!propertyKey) return false;
+        return this.getVaultVocabularySourceBindings().some(binding =>
+            binding.property.toLowerCase() === propertyKey && binding.enabled
+        );
+    }
+
+    synchronizeOverlappingVaultVocabularySources(): boolean {
+        const groups = new Map<string, VaultVocabularySourceBinding[]>();
+        this.getVaultVocabularySourceBindings().forEach(binding => {
+            const key = binding.property.trim().toLowerCase();
+            if (!key) return;
+            const group = groups.get(key) ?? [];
+            group.push(binding);
+            groups.set(key, group);
+        });
+        let changed = false;
+        groups.forEach(group => {
+            if (group.length < 2) return;
+            const enabled = group.some(binding => binding.enabled);
+            if (group.some(binding => binding.enabled !== enabled)) {
+                changed = this.setVaultVocabularyPropertyEnabled(group[0].property, enabled) || changed;
+            }
+        });
+        return changed;
     }
 
     getVocabularyRecordsForFile(
@@ -4078,6 +4380,8 @@ export default class AutotagPlugin extends Plugin {
             return this.getLearnedRelationEditDistance(evidenceCompact, candidateCompact) <= allowedDistance;
         }
         if (relationType === "word-family") {
+            if (this.getStrongLocalStructuralVaultRelation(evidence, candidate)) return true;
+            if (evidenceCompact.length === candidateCompact.length) return false;
             const shorter = evidenceCompact.length <= candidateCompact.length ? evidenceCompact : candidateCompact;
             const longer = evidenceCompact.length > candidateCompact.length ? evidenceCompact : candidateCompact;
             if (shorter.length < 3) return false;
@@ -4093,34 +4397,111 @@ export default class AutotagPlugin extends Plugin {
         return false;
     }
 
+    getIndependentVaultEvidenceChannelCount(channels: VaultEvidenceChannel[]): number {
+        const groups = new Set(channels.map(channel => {
+            if (["aiTags", "description", "semantic", "learned"].includes(channel)) return "ai-semantic";
+            return channel;
+        }));
+        return groups.size;
+    }
+
+    getLearnedVaultRelationSupportCount(relation: Pick<LearnedVaultRelation, "confirmations" | "evidenceChannels" | "confirmationFileKeys">): number {
+        const evidenceChannels = relation.evidenceChannels ?? [];
+        const confirmationFileKeys = relation.confirmationFileKeys ?? [];
+        const hasTrackedSupport = evidenceChannels.length > 0 || confirmationFileKeys.length > 0;
+        return Math.max(
+            1,
+            hasTrackedSupport ? 1 : relation.confirmations || 1,
+            this.getIndependentVaultEvidenceChannelCount(evidenceChannels),
+            new Set(confirmationFileKeys).size
+        );
+    }
+
+    getCompoundRelationshipDirection(evidence: string, candidate: string): "compound-to-component" | "component-to-compound" | "unclear" {
+        const evidenceCompact = (evidence.toLowerCase().match(/[a-z0-9]+/g) ?? []).join("");
+        const candidateCompact = (candidate.toLowerCase().match(/[a-z0-9]+/g) ?? []).join("");
+        if (!evidenceCompact || !candidateCompact || evidenceCompact === candidateCompact) return "unclear";
+        if (evidenceCompact.length > candidateCompact.length && evidenceCompact.includes(candidateCompact)) {
+            return "compound-to-component";
+        }
+        if (candidateCompact.length > evidenceCompact.length && candidateCompact.includes(evidenceCompact)) {
+            return "component-to-compound";
+        }
+        return "unclear";
+    }
+
     getLearnedVaultRelationConfidence(
         relationType: string,
         model: string,
         requestedConfidence: unknown,
-        confirmations: number
+        confirmations: number,
+        evidence = "",
+        candidate = ""
     ): number {
         const parsedConfidence = Number(requestedConfidence);
-        if (Number.isFinite(parsedConfidence)) {
-            return this.clampSetting(Math.round(parsedConfidence), 0, 0, 100);
+        const normalizedModelConfidence = Number.isFinite(parsedConfidence)
+            ? this.clampSetting(Math.round(parsedConfidence), 50, 0, 100)
+            : 50;
+        const normalizedType = relationType.toLowerCase();
+        const normalizedModel = model.toLowerCase();
+        const supportCount = Math.max(1, Math.min(4, Math.round(confirmations)));
+
+        if (normalizedModel.includes("manual review")) return normalizedModelConfidence;
+
+        const isLocalStructuralMatch = normalizedModel.includes("structural matcher");
+        const strongWordFamily = normalizedType === "word-family"
+            ? this.getStrongLocalStructuralVaultRelation(evidence, candidate)
+            : null;
+        if (strongWordFamily) {
+            if (!strongWordFamily.requiresCorroboration) return 98;
+            if (isLocalStructuralMatch) return supportCount >= 2 ? 95 : 84;
+            if (normalizedModelConfidence >= 95) return 97;
+            if (normalizedModelConfidence >= 90) return 96;
+            if (normalizedModelConfidence >= 80) return 94;
+            if (normalizedModelConfidence >= 70) return 91;
+            return 84;
         }
 
-        const normalizedType = relationType.toLowerCase();
-        const isLocalStructuralMatch = model.toLowerCase().includes("structural matcher");
-        let baseConfidence = 70;
-        if (isLocalStructuralMatch) {
-            if (normalizedType === "word-family") baseConfidence = 94;
-            else if (normalizedType === "spelling") baseConfidence = 92;
-            else if (normalizedType === "acronym") baseConfidence = 90;
-            else if (normalizedType === "compound") baseConfidence = 88;
-            else baseConfidence = 85;
-        } else if (normalizedType === "synonym") {
-            baseConfidence = 76;
-        } else if (normalizedType === "broader-narrower") {
-            baseConfidence = 72;
-        } else if (["word-family", "spelling", "acronym", "compound"].includes(normalizedType)) {
-            baseConfidence = 84;
+        const compactLengths = [evidence, candidate].map(value =>
+            (value.toLowerCase().match(/[a-z0-9]+/g) ?? []).join("").length
+        );
+        const shortSpellingPair = Math.min(...compactLengths) <= 5;
+        const compoundDirection = this.getCompoundRelationshipDirection(evidence, candidate);
+        if (normalizedType === "word-family" || normalizedType === "synonym") {
+            if (normalizedModelConfidence >= 95) return 92;
+            if (normalizedModelConfidence >= 90) return 90;
+            if (normalizedModelConfidence >= 80) return 85;
+            return 75;
         }
-        return Math.min(100, baseConfidence + Math.min(12, Math.max(0, confirmations - 1) * 4));
+        if (normalizedType === "acronym") {
+            if (normalizedModelConfidence >= 90) return 94;
+            if (normalizedModelConfidence >= 80) return 90;
+            return 82;
+        }
+        if (normalizedType === "spelling") {
+            const base = shortSpellingPair
+                ? normalizedModelConfidence >= 95 ? 75 : normalizedModelConfidence >= 90 ? 68 : 55
+                : normalizedModelConfidence >= 95 ? 88 : normalizedModelConfidence >= 90 ? 84 : normalizedModelConfidence >= 80 ? 76 : 62;
+            const supportBonus = supportCount >= 3 ? 7 : supportCount >= 2 ? 4 : 0;
+            return Math.min(shortSpellingPair ? 86 : 94, base + supportBonus);
+        }
+        if (normalizedType === "compound") {
+            if (compoundDirection === "compound-to-component") {
+                const base = normalizedModelConfidence >= 95 ? 80 : normalizedModelConfidence >= 90 ? 76 : normalizedModelConfidence >= 80 ? 70 : 60;
+                return Math.min(94, base + (supportCount - 1) * 10);
+            }
+            if (supportCount >= 4) return normalizedModelConfidence >= 90 ? 92 : 88;
+            if (supportCount >= 3) return normalizedModelConfidence >= 95 ? 90 : 86;
+            if (supportCount >= 2) return normalizedModelConfidence >= 95 ? 78 : 72;
+            return normalizedModelConfidence >= 95 ? 65 : 58;
+        }
+        if (normalizedType === "broader-narrower") {
+            if (supportCount >= 4) return normalizedModelConfidence >= 90 ? 93 : 89;
+            if (supportCount >= 3) return normalizedModelConfidence >= 95 ? 90 : 86;
+            if (supportCount >= 2) return normalizedModelConfidence >= 95 ? 84 : 78;
+            return normalizedModelConfidence >= 95 ? 78 : normalizedModelConfidence >= 90 ? 74 : 64;
+        }
+        return Math.min(60, normalizedModelConfidence);
     }
 
     getVaultRelationshipPairKey(evidence: string, candidate: string): string {
@@ -4170,10 +4551,28 @@ export default class AutotagPlugin extends Plugin {
     }
 
     isLearnedVaultRelationReusable(relation: LearnedVaultRelation): boolean {
+        if (relation.pinned) return true;
         if (relation.confidence < this.settings.learnedVaultRelationMinimumConfidence) return false;
         if (!this.isLearnedVaultRelationStructurallyPlausible(relation.evidence, relation.candidate, relation.relationType)) return false;
-        return (relation.relationType !== "synonym" && relation.relationType !== "broader-narrower")
-            || relation.confirmations >= 2;
+        const supportCount = this.getLearnedVaultRelationSupportCount(relation);
+        const normalizedType = relation.relationType.toLowerCase();
+        const strongWordFamily = normalizedType === "word-family"
+            ? this.getStrongLocalStructuralVaultRelation(relation.evidence, relation.candidate)
+            : null;
+        if (strongWordFamily) return relation.confidence >= 90;
+        if (normalizedType === "compound") {
+            return relation.confidence >= 90
+                && supportCount >= (this.getCompoundRelationshipDirection(relation.evidence, relation.candidate) === "compound-to-component" ? 2 : 3);
+        }
+        if (normalizedType === "spelling") {
+            const evidenceLength = this.normalizeLearnedRelationPhrase(relation.evidence).replace(/\s+/g, "").length;
+            const candidateLength = this.normalizeLearnedRelationPhrase(relation.candidate).replace(/\s+/g, "").length;
+            return relation.confidence >= 90
+                && supportCount >= (Math.min(evidenceLength, candidateLength) <= 5 ? 3 : 2);
+        }
+        if (normalizedType === "broader-narrower") return relation.confidence >= 90 && supportCount >= 3;
+        if (["word-family", "synonym", "acronym"].includes(normalizedType)) return relation.confidence >= 90;
+        return false;
     }
 
     getOrderedVaultEvidencePhrases(
@@ -4192,6 +4591,37 @@ export default class AutotagPlugin extends Plugin {
         ]
             .map(value => value.trim())
             .filter(Boolean);
+    }
+
+    getVaultRelationEvidenceChannels(
+        evidence: string,
+        folderCandidates: string[],
+        filenameCandidates: string[],
+        geolocationContextText: string,
+        baseTags: string[],
+        aiDescription: string
+    ): VaultEvidenceChannel[] {
+        const channels: Array<[VaultEvidenceChannel, string[]]> = [
+            ["folder", folderCandidates],
+            ["filename", filenameCandidates],
+            ["geolocation", geolocationContextText.trim() ? [geolocationContextText] : []],
+            ["aiTags", baseTags],
+            ["description", aiDescription.trim() ? [aiDescription] : []],
+        ];
+        return channels
+            .filter(([, values]) => values.some(value => this.hasLearnedRelationEvidence(evidence, value)))
+            .map(([channel]) => channel);
+    }
+
+    getVaultRelationFileKey(filePath: string): string {
+        const normalized = filePath.trim().toLowerCase();
+        if (!normalized) return "";
+        let hash = 2166136261;
+        for (let index = 0; index < normalized.length; index++) {
+            hash ^= normalized.charCodeAt(index);
+            hash = Math.imul(hash, 16777619);
+        }
+        return (hash >>> 0).toString(36);
     }
 
     getExactVaultEvidence(candidate: string, evidencePhrases: string[]): string | null {
@@ -4301,23 +4731,27 @@ export default class AutotagPlugin extends Plugin {
         baseTags: string[],
         aiDescription: string
     ): LocalStructuralRelation | null {
-        const channels = [
-            folderCandidates,
-            filenameCandidates,
-            geolocationContextText.trim() ? [geolocationContextText] : [],
-            baseTags,
-            aiDescription.trim() ? [aiDescription] : [],
+        const channels: Array<[VaultEvidenceChannel, string[]]> = [
+            ["folder", folderCandidates],
+            ["filename", filenameCandidates],
+            ["geolocation", geolocationContextText.trim() ? [geolocationContextText] : []],
+            ["aiTags", baseTags],
+            ["description", aiDescription.trim() ? [aiDescription] : []],
         ];
         const channelMatches = channels
-            .map(channel => this.getStrongLocalStructuralEvidence(candidate, channel))
-            .filter((match): match is Omit<LocalStructuralRelation, "evidenceChannelCount"> => !!match);
+            .map(([channel, values]) => ({
+                channel,
+                match: this.getStrongLocalStructuralEvidence(candidate, values),
+            }))
+            .filter((entry): entry is { channel: VaultEvidenceChannel; match: Omit<LocalStructuralRelation, "evidenceChannelCount"> } => !!entry.match);
         if (channelMatches.length === 0) return null;
 
-        const preferred = channelMatches[0];
-        if (preferred.requiresCorroboration && channelMatches.length < 2) return null;
+        const preferred = channelMatches[0].match;
+        const evidenceChannelCount = this.getIndependentVaultEvidenceChannelCount(channelMatches.map(entry => entry.channel));
+        if (preferred.requiresCorroboration && evidenceChannelCount < 2) return null;
         return {
             ...preferred,
-            evidenceChannelCount: channelMatches.length,
+            evidenceChannelCount,
         };
     }
 
@@ -4380,14 +4814,7 @@ export default class AutotagPlugin extends Plugin {
 
             const structuralEvidence = this.getStructuralVaultEvidence(candidate, evidencePhrases);
             if (structuralEvidence) {
-                const isStrongLocalMatch = !!this.getLocallyAcceptedStructuralRelation(
-                    candidate,
-                    folderCandidates,
-                    filenameCandidates,
-                    geolocationContextText,
-                    baseTags,
-                    aiDescription
-                );
+                const isStrongLocalMatch = !!this.getStrongLocalStructuralVaultRelation(structuralEvidence, candidate);
                 if (this.settings.selfLearningBridgeEnabled
                     && this.settings.vaultMatchingTiers.structural
                     && (isStrongLocalMatch || !this.isRejectedVaultRelationship(structuralEvidence, candidate))) {
@@ -4411,10 +4838,38 @@ export default class AutotagPlugin extends Plugin {
             .slice(0, this.settings.maxPromptVocabularyTerms);
     }
 
-    parseVaultCandidateSelections(
+    normalizeLearnedVaultRelationType(value: unknown): string {
+        if (typeof value !== "string") return "related";
+        const normalized = value.trim().toLowerCase().replace(/[^a-z0-9-]+/g, "-").slice(0, 40);
+        const aliases: Record<string, string> = {
+            grammatical: "word-family",
+            inflection: "word-family",
+            "grammatical-form": "word-family",
+            derivational: "word-family",
+            "word-form": "word-family",
+            equivalent: "synonym",
+            "near-synonym": "synonym",
+            misspelling: "spelling",
+            abbreviation: "acronym",
+            broader: "broader-narrower",
+            narrower: "broader-narrower",
+        };
+        return aliases[normalized] ?? (normalized || "related");
+    }
+
+    normalizeVaultRelationshipVerdict(value: unknown): "same-concept" | "broader-narrower" | "related-only" | "unrelated" {
+        if (typeof value !== "string") return "unrelated";
+        const normalized = value.trim().toLowerCase().replace(/[^a-z0-9-]+/g, "-");
+        if (["same-concept", "equivalent", "same", "canonical-equivalent"].includes(normalized)) return "same-concept";
+        if (["broader-narrower", "broader", "narrower", "direct-hierarchy"].includes(normalized)) return "broader-narrower";
+        if (["related", "related-only", "associated"].includes(normalized)) return "related-only";
+        return "unrelated";
+    }
+
+    parseVaultCandidateReview(
         content: string,
         promptItems: VaultCandidatePromptItem[]
-    ): VaultCandidateSelection[] {
+    ): VaultCandidateReview {
         const cleaned = this.stripThinkBlocks(content)
             .replace(/^```(?:json)?\s*/i, "")
             .replace(/\s*```$/i, "")
@@ -4423,18 +4878,18 @@ export default class AutotagPlugin extends Plugin {
         try {
             const jsonStart = cleaned.indexOf("{");
             const jsonEnd = cleaned.lastIndexOf("}");
-            if (jsonStart === -1 || jsonEnd === -1) return [];
+            if (jsonStart === -1 || jsonEnd === -1) return { selections: [], rejectedIds: [], complete: false };
             const parsed = JSON.parse(cleaned.slice(jsonStart, jsonEnd + 1));
             if (Array.isArray(parsed?.vaultSelections)) {
                 const seen = new Set<string>();
-                return parsed.vaultSelections
+                const parsedSelections: VaultCandidateSelection[] = parsed.vaultSelections
                     .filter((selection: unknown) => selection && typeof selection === "object")
-                    .map((selection: { id?: unknown; evidence?: unknown; type?: unknown; confidence?: unknown }) => ({
+                    .map((selection: { id?: unknown; evidence?: unknown; type?: unknown; verdict?: unknown; safe?: unknown; safeToApply?: unknown; confidence?: unknown }): VaultCandidateSelection => ({
                         id: typeof selection.id === "string" ? selection.id.trim().toLowerCase() : "",
                         evidence: typeof selection.evidence === "string" ? this.normalizeAiTagName(selection.evidence).slice(0, 160) : "",
-                        relationType: typeof selection.type === "string" && selection.type.trim()
-                            ? selection.type.trim().toLowerCase().replace(/[^a-z0-9-]+/g, "-").slice(0, 40)
-                            : "related",
+                        relationType: this.normalizeLearnedVaultRelationType(selection.type),
+                        verdict: this.normalizeVaultRelationshipVerdict(selection.verdict),
+                        safeToApply: selection.safe === true || selection.safeToApply === true,
                         confidence: Number.isFinite(Number(selection.confidence))
                             ? this.clampSetting(selection.confidence, 0, 0, 100)
                             : undefined,
@@ -4444,28 +4899,43 @@ export default class AutotagPlugin extends Plugin {
                         seen.add(selection.id);
                         return true;
                     });
+                const selections = parsedSelections.filter(selection =>
+                    selection.safeToApply
+                    && ["same-concept", "broader-narrower"].includes(selection.verdict)
+                );
+                const rejectedFromSelections = parsedSelections
+                    .filter(selection => !selection.safeToApply
+                        && ["related-only", "unrelated"].includes(selection.verdict))
+                    .map(selection => selection.id);
+                const malformedSelection = parsedSelections.some(selection =>
+                    !selections.includes(selection) && !rejectedFromSelections.includes(selection.id)
+                );
+                const declaredRejectedIds: string[] = Array.isArray(parsed.rejectedIds)
+                    ? Array.from(new Set<string>(parsed.rejectedIds
+                        .filter((id: unknown): id is string => typeof id === "string")
+                        .map((id: string) => id.trim().toLowerCase())
+                        .filter((id: string) => allowedIds.has(id))))
+                    : [];
+                const acceptedIds = new Set(selections.map(selection => selection.id));
+                const hasAcceptedRejectedConflict = declaredRejectedIds.some(id => acceptedIds.has(id));
+                const rejectedIds = Array.from(new Set([
+                    ...rejectedFromSelections,
+                    ...declaredRejectedIds,
+                ])).filter(id => !acceptedIds.has(id));
+                const reviewedIds = new Set([...selections.map(selection => selection.id), ...rejectedIds]);
+                return {
+                    selections,
+                    rejectedIds,
+                    complete: !malformedSelection
+                        && !hasAcceptedRejectedConflict
+                        && allowedIds.size === reviewedIds.size
+                        && Array.from(allowedIds).every(id => reviewedIds.has(id)),
+                };
             }
         } catch {
-            return [];
+            return { selections: [], rejectedIds: [], complete: false };
         }
-
-        const legacyRelations = this.parseLearnedVaultRelations(content);
-        const promptItemByCandidate = new Map(
-            promptItems.map(item => [item.match.candidate.toLowerCase(), item])
-        );
-        const legacySelections: VaultCandidateSelection[] = [];
-        this.normalizeUniqueAiTags(this.parseAiTags(content)).forEach(candidate => {
-            const item = promptItemByCandidate.get(candidate.toLowerCase());
-            const relation = legacyRelations.find(entry => entry.candidate.toLowerCase() === candidate.toLowerCase());
-            if (!item || !relation) return;
-            legacySelections.push({
-                id: item.id,
-                evidence: relation.evidence,
-                relationType: relation.relationType,
-                confidence: relation.confidence,
-            });
-        });
-        return legacySelections;
+        return { selections: [], rejectedIds: [], complete: false };
     }
 
     parseLearnedVaultRelations(content: string): { evidence: string; candidate: string; relationType: string; confidence?: number }[] {
@@ -4484,9 +4954,7 @@ export default class AutotagPlugin extends Plugin {
                 .map((relation: { evidence?: unknown; candidate?: unknown; type?: unknown; confidence?: unknown }) => ({
                     evidence: typeof relation.evidence === "string" ? this.normalizeAiTagName(relation.evidence).slice(0, 160) : "",
                     candidate: typeof relation.candidate === "string" ? this.normalizeAiTagName(relation.candidate).slice(0, 160) : "",
-                    relationType: typeof relation.type === "string" && relation.type.trim()
-                        ? relation.type.trim().toLowerCase().replace(/[^a-z0-9-]+/g, "-").slice(0, 40)
-                        : "related",
+                    relationType: this.normalizeLearnedVaultRelationType(relation.type),
                     confidence: Number.isFinite(Number(relation.confidence))
                         ? this.clampSetting(relation.confidence, 0, 0, 100)
                         : undefined,
@@ -4501,23 +4969,50 @@ export default class AutotagPlugin extends Plugin {
         content: string,
         acceptedTerms: string[],
         evidenceText: string,
-        model: string
+        model: string,
+        evidenceChannelResolver: (evidence: string) => VaultEvidenceChannel[] = () => [],
+        sourceFilePath = ""
     ): boolean {
         const accepted = new Set(acceptedTerms.map(term => term.toLowerCase()));
+        const sourceFileKey = this.getVaultRelationFileKey(sourceFilePath);
         const proposed = this.parseLearnedVaultRelations(content)
             .filter(relation => accepted.has(relation.candidate.toLowerCase()))
             .filter(relation => relation.evidence.toLowerCase() !== relation.candidate.toLowerCase())
             .filter(relation => this.isLearnedVaultRelationTypeEnabled(relation.relationType))
             .filter(relation => this.isLearnedVaultRelationStructurallyPlausible(relation.evidence, relation.candidate, relation.relationType))
             .filter(relation => this.hasLearnedRelationEvidence(relation.evidence, evidenceText))
-            .map(relation => ({
-                ...relation,
-                confidence: this.getLearnedVaultRelationConfidence(relation.relationType, model, relation.confidence, 1),
-            }))
+            .map(relation => {
+                const evidenceChannels = Array.from(new Set(evidenceChannelResolver(relation.evidence)));
+                const confirmationFileKeys = sourceFileKey ? [sourceFileKey] : [];
+                const confirmations = Math.max(
+                    1,
+                    this.getIndependentVaultEvidenceChannelCount(evidenceChannels),
+                    confirmationFileKeys.length
+                );
+                const modelConfidence = Number.isFinite(Number(relation.confidence))
+                    ? this.clampSetting(relation.confidence, 50, 0, 100)
+                    : 50;
+                return {
+                    ...relation,
+                    modelConfidence,
+                    evidenceChannels,
+                    confirmationFileKeys,
+                    confirmations,
+                    confidence: this.getLearnedVaultRelationConfidence(
+                        relation.relationType,
+                        model,
+                        modelConfidence,
+                        confirmations,
+                        relation.evidence,
+                        relation.candidate
+                    ),
+                };
+            })
             .filter(relation => relation.confidence >= this.settings.learnedVaultRelationMinimumConfidence);
+        const retainedCandidates = new Set(proposed.map(relation => relation.candidate.toLowerCase()));
         const rejectedCount = this.settings.rejectedVaultRelations.length;
         this.settings.rejectedVaultRelations = this.settings.rejectedVaultRelations.filter(relation =>
-            !accepted.has(relation.candidate.toLowerCase())
+            !retainedCandidates.has(relation.candidate.toLowerCase())
             || !this.hasLearnedRelationEvidence(relation.evidence, evidenceText)
         );
         let changed = this.settings.rejectedVaultRelations.length !== rejectedCount;
@@ -4532,16 +5027,29 @@ export default class AutotagPlugin extends Plugin {
             const pairKey = this.getVaultRelationshipPairKey(relation.evidence, relation.candidate);
             const existing = relationsByPair.get(pairKey);
             if (existing) {
+                const previousSupportCount = this.getLearnedVaultRelationSupportCount(existing);
+                existing.evidenceChannels = Array.from(new Set([
+                    ...(existing.evidenceChannels ?? []),
+                    ...relation.evidenceChannels,
+                ]));
+                existing.confirmationFileKeys = Array.from(new Set([
+                    ...(existing.confirmationFileKeys ?? []),
+                    ...relation.confirmationFileKeys,
+                ]));
+                existing.confirmations = this.getLearnedVaultRelationSupportCount(existing);
                 existing.relationType = relation.relationType;
                 existing.model = model;
-                existing.confirmations += 1;
-                existing.confidence = Math.min(100, Math.max(
-                    existing.confidence,
-                    relation.confidence,
-                    this.getLearnedVaultRelationConfidence(relation.relationType, model, relation.confidence, existing.confirmations)
-                ) + 2);
-                existing.lastConfirmedAt = now;
-                existing.lastUsedAt = now;
+                existing.modelConfidence = Math.max(existing.modelConfidence ?? 0, relation.modelConfidence);
+                const supportCount = this.getLearnedVaultRelationSupportCount(existing);
+                existing.confidence = this.getLearnedVaultRelationConfidence(
+                    relation.relationType,
+                    model,
+                    existing.modelConfidence,
+                    supportCount,
+                    relation.evidence,
+                    relation.candidate
+                );
+                if (supportCount > previousSupportCount) existing.lastConfirmedAt = now;
                 changed = true;
                 return;
             }
@@ -4549,10 +5057,9 @@ export default class AutotagPlugin extends Plugin {
                 ...relation,
                 model,
                 pinned: false,
-                confirmations: 1,
                 createdAt: now,
                 lastConfirmedAt: now,
-                lastUsedAt: now,
+                lastUsedAt: 0,
             };
             this.settings.learnedVaultRelations.push(createdRelation);
             relationsByPair.set(pairKey, createdRelation);
@@ -4614,7 +5121,7 @@ export default class AutotagPlugin extends Plugin {
             "Generated by Autotag inside the plugin folder. Changes made here are not imported and may be overwritten.",
             "Exact vocabulary matches and configured aliases are accepted directly and are intentionally not stored as learned relationships.",
             "",
-            `Accepted cache: ${relations.length} / ${this.settings.learnedVaultRelationCacheLimit}`,
+            `Retained cache: ${relations.length} / ${this.settings.learnedVaultRelationCacheLimit}`,
             `Minimum retained confidence: ${this.settings.learnedVaultRelationMinimumConfidence}`,
             "",
             ...(relations.length > 0
@@ -4624,7 +5131,7 @@ export default class AutotagPlugin extends Plugin {
                     `${relation.confidence}% confidence`,
                     relation.pinned ? "kept manually" : "automatic",
                     this.isLearnedVaultRelationReusable(relation) ? "ready" : "awaiting confirmation",
-                    `${relation.confirmations} confirmation${relation.confirmations === 1 ? "" : "s"}`,
+                    `${this.getLearnedVaultRelationSupportCount(relation)} independent support${this.getLearnedVaultRelationSupportCount(relation) === 1 ? "" : "s"}`,
                     clean(relation.model || "unknown model"),
                 ].join(" | "))
                 : ["No learned relationships yet."]),
@@ -4708,7 +5215,7 @@ export default class AutotagPlugin extends Plugin {
         if (!relation) return false;
         relation.pinned = true;
         relation.confidence = 100;
-        relation.confirmations = Math.max(2, relation.confirmations);
+        relation.modelConfidence = 100;
         relation.lastConfirmedAt = Date.now();
         await this.persistVaultRelationshipChanges();
         return true;
@@ -4766,12 +5273,22 @@ export default class AutotagPlugin extends Plugin {
         const evidence = this.normalizeAiTagName(updates.evidence).slice(0, 160);
         const candidate = this.normalizeAiTagName(updates.candidate).slice(0, 160);
         if (!evidence || !candidate || evidence.toLowerCase() === candidate.toLowerCase()) return false;
-        const relationType = updates.relationType.trim().toLowerCase().replace(/[^a-z0-9-]+/g, "-").slice(0, 40) || "related";
+        const relationType = this.normalizeLearnedVaultRelationType(updates.relationType);
+        const relationshipChanged = relation.evidence.toLowerCase() !== evidence.toLowerCase()
+            || relation.candidate.toLowerCase() !== candidate.toLowerCase()
+            || relation.relationType !== relationType;
         relation.evidence = evidence;
         relation.candidate = candidate;
         relation.relationType = relationType;
         relation.confidence = this.clampSetting(updates.confidence, relation.confidence, 0, 100);
+        relation.modelConfidence = relation.confidence;
         relation.model = "Manual review";
+        relation.pinned = false;
+        if (relationshipChanged) {
+            relation.confirmations = 1;
+            relation.evidenceChannels = ["manual"];
+            relation.confirmationFileKeys = [];
+        }
         relation.lastConfirmedAt = Date.now();
         this.pruneLearnedVaultRelations();
         await this.persistVaultRelationshipChanges();
@@ -4787,6 +5304,18 @@ export default class AutotagPlugin extends Plugin {
         if (normalized === "spelling") return this.settings.vaultMatchingTiers.structural && this.settings.vaultLinguisticFeatures.spellingVariants !== "exclude";
         if (normalized === "acronym") return this.settings.vaultMatchingTiers.structural && this.settings.vaultLinguisticFeatures.acronymsAbbreviations !== "exclude";
         if (normalized === "broader-narrower") return this.settings.vaultMatchingTiers.semantic && this.settings.vaultLinguisticFeatures.broaderNarrower === "use";
+        return false;
+    }
+
+    isVaultCandidateSelectionSemanticallySafe(selection: VaultCandidateSelection): boolean {
+        if (!selection.safeToApply || selection.confidence === undefined) return false;
+        const normalizedType = this.normalizeLearnedVaultRelationType(selection.relationType);
+        if (selection.verdict === "same-concept") {
+            return ["word-family", "synonym", "spelling", "acronym"].includes(normalizedType);
+        }
+        if (selection.verdict === "broader-narrower") {
+            return ["compound", "broader-narrower"].includes(normalizedType);
+        }
         return false;
     }
 
@@ -4928,13 +5457,13 @@ export default class AutotagPlugin extends Plugin {
     hasConfiguredFolderAiCandidateSource(): boolean {
         if (!this.settings.useFolderTags) return false;
         return this.getFolderPropertyMappings().some(mapping => this.isCandidateSourceConfigured(this.getFolderMappingAiCandidateMode(mapping)))
-            || this.isCandidateSourceConfigured(this.getFolderFallbackAiCandidateMode());
+            || (this.settings.folderFallbackEnabled && this.isCandidateSourceConfigured(this.getFolderFallbackAiCandidateMode()));
     }
 
     hasActiveFolderAiCandidateSource(): boolean {
         if (!this.settings.useFolderTags) return false;
         return this.getFolderPropertyMappings().some(mapping => this.isCandidateSourceActive(this.getFolderMappingAiCandidateMode(mapping)))
-            || this.isCandidateSourceActive(this.getFolderFallbackAiCandidateMode());
+            || (this.settings.folderFallbackEnabled && this.isCandidateSourceActive(this.getFolderFallbackAiCandidateMode()));
     }
 
     isBridgeAiInputUsable(): boolean {
@@ -5064,17 +5593,145 @@ export default class AutotagPlugin extends Plugin {
         return tags.filter(tag => !excludedTerms.has(this.normalizeAiTagName(tag).toLowerCase()));
     }
 
+    isLearnedFilenameStopWordReusable(entry: LearnedFilenameStopWord): boolean {
+        if (entry.status === "accepted") return true;
+        return entry.status === "provisional"
+            && entry.confirmationFileKeys.length >= 2
+            && entry.confidence >= 80;
+    }
+
+    getEffectiveFilenameStopWords(): Set<string> {
+        const stopWords = new Set<string>();
+        if (!this.settings.filenameFillerWordsEnabled) return stopWords;
+        DEFAULT_FILENAME_STOP_WORDS.forEach(word => stopWords.add(word));
+        if (!this.settings.selfLearningBridgeEnabled) return stopWords;
+        this.settings.learnedFilenameStopWords
+            .filter(entry => this.isLearnedFilenameStopWordReusable(entry))
+            .forEach(entry => stopWords.add(entry.word.toLowerCase()));
+        return stopWords;
+    }
+
+    getFilenameStopWordLearningCandidates(file: TFile | null): string[] {
+        if (!file
+            || !this.settings.filenameFillerWordsEnabled
+            || !this.settings.selfLearningBridgeEnabled
+            || !this.settings.aiTaggingEnabled
+            || !this.settings.filenameCandidatesHumanReadableOnly
+            || !this.isCandidateSourceActive(this.settings.filenameCandidateMode)) {
+            return [];
+        }
+
+        const builtInStopWords = new Set(DEFAULT_FILENAME_STOP_WORDS);
+        const learnedByWord = new Map(this.settings.learnedFilenameStopWords.map(entry => [entry.word.toLowerCase(), entry]));
+        const seen = new Set<string>();
+        return this.getFilenameWords(file.basename, true)
+            .map(word => this.normalizeAiTagName(word))
+            .filter(word => word.length >= 2 && !/^\d+$/.test(word) && !this.isFilenameNoiseWord(word))
+            .filter(word => {
+                const key = word.toLowerCase();
+                if (seen.has(key) || builtInStopWords.has(key)) return false;
+                seen.add(key);
+                const learned = learnedByWord.get(key);
+                return !learned || (learned.status === "provisional" && !this.isLearnedFilenameStopWordReusable(learned));
+            })
+            .slice(0, 30);
+    }
+
+    getLearnedFilenameStopWordConfidence(modelConfidence: number, supportCount: number): number {
+        const normalizedModelConfidence = this.clampSetting(modelConfidence, 50, 0, 100);
+        if (supportCount >= 3) return Math.min(96, Math.round(82 + normalizedModelConfidence * 0.14));
+        if (supportCount >= 2) return Math.min(88, Math.round(70 + normalizedModelConfidence * 0.18));
+        return Math.min(60, Math.round(48 + normalizedModelConfidence * 0.12));
+    }
+
+    async rememberLearnedFilenameStopWords(
+        content: string,
+        allowedCandidates: string[],
+        sourceFilePath: string,
+        model: string
+    ): Promise<boolean> {
+        if (allowedCandidates.length === 0) return false;
+        const allowedByKey = new Map(allowedCandidates.map(word => [word.toLowerCase(), word]));
+        const proposals = this.parseFilenameStopWordProposals(content)
+            .filter(proposal => allowedByKey.has(proposal.word.toLowerCase()));
+        if (proposals.length === 0) return false;
+
+        const sourceFileKey = this.getVaultRelationFileKey(sourceFilePath);
+        const entriesByKey = new Map(this.settings.learnedFilenameStopWords.map(entry => [entry.word.toLowerCase(), entry]));
+        let changed = false;
+        const now = Date.now();
+        proposals.forEach(proposal => {
+            const key = proposal.word.toLowerCase();
+            const existing = entriesByKey.get(key);
+            if (existing?.status === "rejected") return;
+            if (existing) {
+                const fileKeys = new Set(existing.confirmationFileKeys);
+                if (sourceFileKey) fileKeys.add(sourceFileKey);
+                existing.confirmationFileKeys = Array.from(fileKeys);
+                existing.modelConfidence = Math.max(existing.modelConfidence, proposal.confidence);
+                existing.confidence = existing.status === "accepted"
+                    ? 100
+                    : this.getLearnedFilenameStopWordConfidence(existing.modelConfidence, existing.confirmationFileKeys.length);
+                existing.model = model;
+                existing.lastSeenAt = now;
+                changed = true;
+                return;
+            }
+            const confirmationFileKeys = sourceFileKey ? [sourceFileKey] : [];
+            const entry: LearnedFilenameStopWord = {
+                word: allowedByKey.get(key) ?? proposal.word,
+                modelConfidence: proposal.confidence,
+                confidence: this.getLearnedFilenameStopWordConfidence(proposal.confidence, confirmationFileKeys.length),
+                status: "provisional",
+                confirmationFileKeys,
+                model,
+                createdAt: now,
+                lastSeenAt: now,
+            };
+            this.settings.learnedFilenameStopWords.push(entry);
+            entriesByKey.set(key, entry);
+            changed = true;
+        });
+        if (changed) await this.saveSettings();
+        return changed;
+    }
+
+    async acceptLearnedFilenameStopWord(word: string): Promise<boolean> {
+        const entry = this.settings.learnedFilenameStopWords.find(candidate => candidate.word.toLowerCase() === word.toLowerCase());
+        if (!entry) return false;
+        entry.status = "accepted";
+        entry.confidence = 100;
+        entry.modelConfidence = 100;
+        entry.lastSeenAt = Date.now();
+        await this.saveSettings();
+        return true;
+    }
+
+    async rejectLearnedFilenameStopWord(word: string): Promise<boolean> {
+        const entry = this.settings.learnedFilenameStopWords.find(candidate => candidate.word.toLowerCase() === word.toLowerCase());
+        if (!entry) return false;
+        entry.status = "rejected";
+        entry.lastSeenAt = Date.now();
+        await this.saveSettings();
+        return true;
+    }
+
+    async removeLearnedFilenameStopWord(word: string): Promise<boolean> {
+        const before = this.settings.learnedFilenameStopWords.length;
+        this.settings.learnedFilenameStopWords = this.settings.learnedFilenameStopWords
+            .filter(entry => entry.word.toLowerCase() !== word.toLowerCase());
+        if (this.settings.learnedFilenameStopWords.length === before) return false;
+        await this.saveSettings();
+        return true;
+    }
+
     getFilenameKeywordCandidates(file: TFile | null): string[] {
         if (!file || this.settings.filenameCandidateMode === "disabled") {
             return [];
         }
 
         const excludedTerms = this.getExcludedVocabularyTermSet();
-        const stopWords = new Set([
-            "a", "an", "and", "are", "as", "at", "by", "for", "from", "in", "into", "is",
-            "of", "on", "or", "the", "to", "with", "without", "und", "oder", "der", "die", "das",
-            "ein", "eine", "einer", "eines", "mit", "von", "zu", "im", "am"
-        ]);
+        const stopWords = this.getEffectiveFilenameStopWords();
         const humanReadableOnly = this.settings.filenameCandidatesHumanReadableOnly;
         let words = this.getFilenameWords(file.basename, humanReadableOnly)
             .map(word => word.trim())
@@ -5192,6 +5849,7 @@ export default class AutotagPlugin extends Plugin {
             ...filenameCandidates,
             geolocationText,
             ...baseTags,
+            aiDescription,
             ...semanticHints,
         ].filter(Boolean);
         const manualRules = this.settings.manualEnrichmentEnabled && this.hasUsableBridgeInput()
@@ -5483,7 +6141,8 @@ export default class AutotagPlugin extends Plugin {
         filenameMode: CandidateMode,
         folderTagCandidateHint: string,
         folderMode: CandidateMode,
-        geolocationContextText: string = ""
+        geolocationContextText: string = "",
+        filenameStopWordLearningCandidates: string[] = []
     ): { role: string; content: string }[] {
         const hasGeolocationContext = geolocationContextText.trim().length > 0;
         const geolocationAllowedForAiTags = hasGeolocationContext && !this.settings.removeGeolocationFromAiTags;
@@ -5516,9 +6175,11 @@ export default class AutotagPlugin extends Plugin {
         const includeVaultLookupHints = this.settings.vaultAwarenessEnabled
             && this.settings.selfLearningBridgeEnabled
             && this.settings.vaultMatchingTiers.semantic;
-        const responseShape = includeVaultLookupHints
-            ? '{"aitags":["term"],"vaultHints":["close wording or concept"]}'
-            : '{"aitags":["term"]}';
+        const includeFilenameStopWordLearning = filenameStopWordLearningCandidates.length > 0;
+        const responseFields = ['"aitags":["term"]'];
+        if (includeVaultLookupHints) responseFields.push('"vaultHints":["close wording or concept"]');
+        if (includeFilenameStopWordLearning) responseFields.push('"filenameStopWords":[{"word":"filler","confidence":85}]');
+        const responseShape = `{${responseFields.join(",")}}`;
         return [
             {
                 role: "system",
@@ -5527,6 +6188,7 @@ export default class AutotagPlugin extends Plugin {
                     `Respond with JSON only in this exact shape: ${responseShape}.`,
                     this.getOllamaGeneratedTagsCap() === 0 ? "Use as many useful concise terms as are genuinely supported." : `Use concise terms and return at most ${this.getOllamaGeneratedTagsCap()} aitags.`,
                     "Prefer nouns and concepts visible or strongly implied by the description.",
+                    "Keep useful concise phrases from the image description in their original wording. If a synonym improves searchability, add it in addition instead of replacing the described phrase.",
                     "Add useful synonyms when they improve searchability, such as fortress for castle.",
                     "Do not use vault vocabulary yet; this pass creates base tags only.",
                     filenameInstruction,
@@ -5540,6 +6202,9 @@ export default class AutotagPlugin extends Plugin {
                     includeVaultLookupHints
                         ? "vaultHints are retrieval hints only and are never written directly. Return at most 20 concise alternative wordings, inflections, direct synonyms, or immediate broader/narrower concepts that could help find equivalent existing vault vocabulary. Do not repeat aitags and do not create chains of related concepts."
                         : "",
+                    includeFilenameStopWordLearning
+                        ? "filenameStopWords is the conservative Filename Filler Words Discard Collection learning channel. Select only exact supplied candidates that are grammatical glue or recurring technical/workflow filler with no useful subject, object, place, style, or descriptive meaning. Do not classify nouns, adjectives, names, locations, visual concepts, or uncertain words as filler. Confidence describes certainty that the word is generally unhelpful filename filler, not merely irrelevant to this one image. Returning none is preferred when uncertain."
+                        : "",
                     "Reject candidates that are only common, recent, adjacent, or listed but not supported by the description or an allowed metadata source.",
                     "Do not include markdown, hashtags, explanations, paths, or duplicate terms.",
                 ].filter(Boolean).join(" "),
@@ -5551,6 +6216,9 @@ export default class AutotagPlugin extends Plugin {
                     aiDescription.trim(),
                     "",
                     `Filename keyword candidates (${filenameMode}): ${filenameCandidateHint}`,
+                    includeFilenameStopWordLearning
+                        ? `Filename filler-word learning candidates (select exact values only): ${filenameStopWordLearningCandidates.join(", ")}`
+                        : "",
                     `Folder tag keyword candidates (${folderMode}): ${folderTagCandidateHint}`,
                     hasGeolocationContext
                         ? `${geolocationAllowedForAiTags ? "Known geolocation metadata" : "Known geolocation metadata (do not write as aitags)"}: ${geolocationContextText.trim()}`
@@ -5811,11 +6479,15 @@ export default class AutotagPlugin extends Plugin {
             {
                 role: "system",
                 content: [
-                    "You select additional Obsidian semantic tags from known vault vocabulary.",
-                    'Respond with JSON only in this exact shape: {"vaultSelections":[{"id":"c1","evidence":"exact evidence text","type":"word-family","confidence":85}]}.',
+                    "You validate possible mappings from current file evidence to existing Obsidian vault vocabulary.",
+                    'Respond with JSON only in this exact shape: {"vaultSelections":[{"id":"c1","evidence":"exact evidence text","type":"word-family","verdict":"same-concept","safe":true,"confidence":95}],"rejectedIds":["c2"]}.',
                     `Return at most ${this.settings.maxVaultAwareAdditions} additional known vault concepts that genuinely fit; returning none is correct when none are clearly evidenced.`,
                     "Select only supplied candidate IDs. Never rewrite, translate, or return the candidate wording itself.",
-                    "Candidates are shown as ID: vault value <- supporting evidence (matching tier). Return the ID on the left and copy the shortest supporting evidence into that selection.",
+                    "Each candidate block labels its ID, VAULT VALUE, EVIDENCE, and RETRIEVAL TIER separately. Return the candidate ID and copy text from EVIDENCE, never from VAULT VALUE.",
+                    "Review every supplied candidate ID exactly once. Put a candidate in vaultSelections only when it is safe to apply; put every remaining ID in rejectedIds. Never omit an ID and never place one in both arrays.",
+                    "Judge every evidence-to-vault-value pair independently. A valid pair must not lose confidence or be rejected merely because other candidates are also valid.",
+                    "Use verdict same-concept only for interchangeable grammatical forms, direct synonyms, genuine spelling variants, or acronyms. Use broader-narrower only for a direct and truthful hierarchy. Related-only associations and unrelated pairs belong in rejectedIds.",
+                    "Set safe to true only when writing the existing vault value would truthfully describe this file. Do not return safe false entries in vaultSelections.",
                     "Judge evidence in this priority order: controlled folder candidates first, filename candidates second, known geolocation third, generated AI tags fourth, and the image description fifth. Higher-priority evidence should resolve conflicts, but every accepted value must still fit the file.",
                     "Retrieval hints only help find possible wording. They are not evidence and must never be accepted by themselves.",
                     geolocationAllowedForAiTags
@@ -5830,10 +6502,11 @@ export default class AutotagPlugin extends Plugin {
                         : "Do not add city, country, landmark, or region concepts from visual style alone.",
                     ...this.getLinguisticPromptInstructions(this.settings.vaultLinguisticFeatures),
                     relationshipInstruction,
-
+                    "For compound relationships, shared letters are never enough. Accept only when the longer expression genuinely contains the shorter concept with the same meaning. A specific compound may support its broader component, but a generic component must not imply a more specific compound without separate evidence for the modifier.",
+                    "For spelling relationships, reject pairs that are separate valid words or concepts even when their edit distance is small, such as Room and Roof. Reject substring accidents such as Atmosphere and Sphere.",
                     "Avoid category drift. Do not add concepts based merely on association, mood, style, genre, setting, co-occurrence, popularity, or recency.",
                     "Do not add a vault concept only because it is common, recent, or listed.",
-                    "For every selection, copy the shortest supporting word or phrase exactly from the supplied evidence. Use a concise type such as word-family, synonym, compound, spelling, acronym, or broader-narrower. Add an integer confidence from 0 to 100 for the direct relationship itself; use lower scores when the mapping is ambiguous.",
+                    "For every selection, copy the shortest supporting word or phrase exactly from the supplied evidence. Use exactly one type: word-family, synonym, compound, spelling, acronym, or broader-narrower. Add an integer confidence from 0 to 100 for the direct relationship itself. Reserve 90 to 100 for direct, unambiguous equivalence; score plausible but context-dependent relationships below 80 and reject merely related pairs.",
                     "Do not include markdown, hashtags, explanations, paths, or duplicate terms.",
                 ].join(" "),
             },
@@ -5851,11 +6524,75 @@ export default class AutotagPlugin extends Plugin {
                     semanticHints.length > 0 ? `Retrieval hints (not evidence): ${semanticHints.join(", ")}` : "",
                     `Known vault vocabulary candidates: ${vaultVocabularyHint}`,
                     "",
-                    'Return JSON only with clearly evidenced candidate IDs and reusable evidence relations, or an empty array: {"vaultSelections":[{"id":"c1","evidence":"exact evidence text","type":"word-family","confidence":85}]}',
+                    'Return every candidate ID exactly once: safe mappings in vaultSelections and all others in rejectedIds. Example: {"vaultSelections":[{"id":"c1","evidence":"exact evidence text","type":"word-family","verdict":"same-concept","safe":true,"confidence":95}],"rejectedIds":["c2"]}',
                 ].filter(line => line !== "").join("\n"),
             },
         ];
     }
+
+    async requestVaultCandidateReview(
+        promptItems: VaultCandidatePromptItem[],
+        messages: { role: string; content: string }[],
+        vaultEvidenceText: string,
+        endpoint: string,
+        model: string,
+        label: string,
+        numPredict: number
+    ): Promise<VaultCandidateReview | null> {
+        const promptItemById = new Map(promptItems.map(item => [item.id, item]));
+        const requestVariants = this.buildOllamaTagRequestVariants(model, messages, numPredict, 0.1).slice(0, 2);
+        for (let attempt = 0; attempt < requestVariants.length; attempt++) {
+            try {
+                const response = await this.runOllamaInference(() => requestUrl({
+                    url: endpoint,
+                    method: "POST",
+                    throw: false,
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(requestVariants[attempt]),
+                }));
+                if (response.status < 200 || response.status >= 300) {
+                    console.warn(`Autotag ${label} attempt failed`, {
+                        attempt: attempt + 1,
+                        model,
+                        status: response.status,
+                        body: response.text?.slice(0, 300) || "no response body",
+                    });
+                    continue;
+                }
+
+                const rawText = this.extractOllamaMessageText(response.json);
+                console.log(`Autotag ${label} raw response (attempt ${attempt + 1}):`, rawText);
+                if (!this.isValidVaultAwarenessResponse(rawText)) continue;
+
+                const review = this.parseVaultCandidateReview(rawText, promptItems);
+                if (!review.complete) {
+                    console.warn(`Autotag ${label} response did not review every candidate; retrying.`, rawText);
+                    continue;
+                }
+                const hasInvalidSelection = review.selections.some(selection => {
+                    const promptItem = promptItemById.get(selection.id);
+                    if (!promptItem || !this.isVaultCandidateSelectionSemanticallySafe(selection)) return true;
+                    const term = promptItem.match.candidate;
+                    return !this.isLearnedVaultRelationTypeEnabled(selection.relationType)
+                        || !this.hasLearnedRelationEvidence(selection.evidence, vaultEvidenceText)
+                        || !this.isLearnedVaultRelationStructurallyPlausible(selection.evidence, term, selection.relationType);
+                });
+                if (hasInvalidSelection) {
+                    console.warn(`Autotag ${label} response contained an unsafe or malformed accepted relationship; retrying.`, rawText);
+                    continue;
+                }
+                return review;
+            } catch (error) {
+                console.warn(`Autotag ${label} attempt threw`, {
+                    attempt: attempt + 1,
+                    model,
+                    error: error instanceof Error ? error.message : String(error),
+                });
+            }
+        }
+        return null;
+    }
+
     async selectVaultAwareTags(
         baseTags: string[],
         aiDescription: string,
@@ -5868,9 +6605,10 @@ export default class AutotagPlugin extends Plugin {
         endpoint: string,
         model: string,
         learningEvidenceTags: string[] = baseTags,
-        semanticHints: string[] = []
+        semanticHints: string[] = [],
+        sourceFilePath = ""
     ): Promise<string[]> {
-        if (!this.settings.vaultAwarenessEnabled || !this.settings.selfLearningBridgeEnabled) {
+        if (!this.settings.vaultAwarenessEnabled) {
             return [];
         }
         await this.ensureVaultVocabularyCacheReady();
@@ -5882,6 +6620,14 @@ export default class AutotagPlugin extends Plugin {
             learningEvidenceTags.join(" "),
             aiDescription,
         ].join(" ");
+        const resolveEvidenceChannels = (evidence: string) => this.getVaultRelationEvidenceChannels(
+            evidence,
+            folderTagCandidates,
+            filenameCandidates,
+            geolocationContextText,
+            learningEvidenceTags,
+            aiDescription
+        );
         const rankedVocabularyTerms = this.getRankedVaultVocabularyTerms(
             folderTagCandidates,
             filenameCandidates,
@@ -5948,7 +6694,9 @@ export default class AutotagPlugin extends Plugin {
                 localRelationshipJson,
                 locallyVerifiedStructuralMatches.map(match => match.candidate),
                 vaultEvidenceText,
-                "Autotag structural matcher"
+                "Autotag structural matcher",
+                resolveEvidenceChannels,
+                sourceFilePath
             ) || relationshipChangesPending;
         }
         if (unresolvedMatches.length === 0) {
@@ -5966,9 +6714,14 @@ export default class AutotagPlugin extends Plugin {
                 const label = this.settings.vaultMatchingTiers.aliases && this.settings.vaultLinguisticFeatures.vaultAliases !== "exclude"
                     ? this.getVaultPromptLabel(item.match.candidate)
                     : item.match.candidate;
-                return `${item.id}: ${label} <- ${item.match.evidence} (${item.match.tier})`;
+                return [
+                    item.id,
+                    `VAULT VALUE: ${label}`,
+                    `EVIDENCE: ${item.match.evidence}`,
+                    `RETRIEVAL TIER: ${item.match.tier}`,
+                ].join("\n");
             })
-            .join("\n");
+            .join("\n\n");
         const filenameCandidateHint = filenameCandidates.length > 0 ? filenameCandidates.join(", ") : "none";
         const folderTagCandidateHint = folderTagCandidates.length > 0 ? folderTagCandidates.join(", ") : "none";
 
@@ -5982,116 +6735,140 @@ export default class AutotagPlugin extends Plugin {
             geolocationContextText,
             semanticHints
         );
-        const requestVariants = this.buildOllamaTagRequestVariants(model, messages).slice(0, 2);
+        let candidateReview = await this.requestVaultCandidateReview(
+            promptItems,
+            messages,
+            vaultEvidenceText,
+            endpoint,
+            model,
+            "vault awareness",
+            1024
+        );
+        if (!candidateReview) {
+            if (relationshipChangesPending) await this.persistVaultRelationshipChanges();
+            return this.normalizeUniqueAiTags(locallyAccepted).slice(0, this.settings.maxVaultAwareAdditions);
+        }
 
-        for (let attempt = 0; attempt < requestVariants.length; attempt++) {
-            try {
-                const response = await this.runOllamaInference(() => requestUrl({
-                    url: endpoint,
-                    method: "POST",
-                    throw: false,
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify(requestVariants[attempt]),
-                }));
-
-                if (response.status < 200 || response.status >= 300) {
-                    console.warn("Autotag vault awareness attempt failed", {
-                        attempt: attempt + 1,
-                        model,
-                        status: response.status,
-                        body: response.text?.slice(0, 300) || "no response body",
-                    });
-                    continue;
-                }
-
-                const rawText = this.extractOllamaMessageText(response.json);
-                console.log(`Autotag vault awareness raw response (attempt ${attempt + 1}):`, rawText);
-                if (!this.isValidVaultAwarenessResponse(rawText)) continue;
-
-                const parsedSelections = this.parseVaultCandidateSelections(rawText, promptItems);
-                const verifiedRelations: { evidence: string; candidate: string; relationType: string; confidence?: number }[] = [];
-                const aiAccepted = parsedSelections.map(selection => {
-                    const promptItem = promptItemById.get(selection.id);
-                    if (!promptItem) return null;
-                    const term = promptItem.match.candidate;
-                    const match = promptItem.match;
-                    let relationType = selection.relationType;
-                    let relationEvidence = selection.evidence;
-                    const returnedRelationIsValid = this.isLearnedVaultRelationTypeEnabled(relationType)
-                        && this.hasLearnedRelationEvidence(relationEvidence, vaultEvidenceText)
-                        && this.isLearnedVaultRelationStructurallyPlausible(relationEvidence, term, relationType);
-                    let relationConfidence = returnedRelationIsValid ? selection.confidence : undefined;
-
-                    if (!returnedRelationIsValid && match.tier === "structural") {
-                        const localRelationType = this.getStructuralVaultRelationType(match.evidence, term);
-                        if (localRelationType && this.isLearnedVaultRelationTypeEnabled(localRelationType)) {
-                            relationType = localRelationType;
-                            relationEvidence = match.evidence;
-                            relationConfidence = undefined;
-                        }
-                    }
-                    if (!relationType
-                        || !this.hasLearnedRelationEvidence(relationEvidence, vaultEvidenceText)
-                        || !this.isLearnedVaultRelationStructurallyPlausible(relationEvidence, term, relationType)) return null;
-                    const normalizedConfidence = this.getLearnedVaultRelationConfidence(
-                        relationType,
-                        model,
-                        relationConfidence,
-                        1
-                    );
-                    if (normalizedConfidence < this.settings.learnedVaultRelationMinimumConfidence) return null;
-                    verifiedRelations.push({
-                        evidence: relationEvidence,
-                        candidate: term,
-                        relationType,
-                        confidence: normalizedConfidence,
-                    });
-                    return term;
-                }).filter((term): term is string => !!term);
-                const accepted = this.normalizeUniqueAiTags([...locallyAccepted, ...aiAccepted])
-                    .slice(0, this.settings.maxVaultAwareAdditions);
-                const verifiedRelationshipJson = JSON.stringify({
-                    relations: verifiedRelations.map(relation => ({
-                        candidate: relation.candidate,
-                        evidence: relation.evidence,
-                        type: relation.relationType,
-                        confidence: relation.confidence,
-                    })),
-                });
-                relationshipChangesPending = this.rememberLearnedVaultRelations(
-                    verifiedRelationshipJson,
-                    aiAccepted,
-                    vaultEvidenceText,
-                    model
-                ) || relationshipChangesPending;
-                relationshipChangesPending = this.rememberRejectedVaultRelationships(
-                    unresolvedMatches,
-                    aiAccepted,
-                    model
-                ) || relationshipChangesPending;
-                if (relationshipChangesPending) await this.persistVaultRelationshipChanges();
-                return accepted;
-            } catch (e) {
-                console.warn("Autotag vault awareness attempt threw", {
-                    attempt: attempt + 1,
-                    model,
-                    error: e instanceof Error ? e.message : String(e),
-                });
+        const disputedStrongItems = candidateReview.rejectedIds
+            .map(id => promptItemById.get(id))
+            .filter((item): item is VaultCandidatePromptItem => !!item
+                && item.match.tier === "structural"
+                && !!this.getStrongLocalStructuralVaultRelation(item.match.evidence, item.match.candidate));
+        if (disputedStrongItems.length > 0) {
+            const focusedVocabularyHint = disputedStrongItems
+                .map(item => [
+                    item.id,
+                    `VAULT VALUE: ${item.match.candidate}`,
+                    `EVIDENCE: ${item.match.evidence}`,
+                    "RETRIEVAL TIER: strong structural disagreement",
+                ].join("\n"))
+                .join("\n\n");
+            const focusedMessages = this.buildOllamaVaultAwarenessMessages(
+                baseTags,
+                aiDescription,
+                filenameCandidateHint,
+                folderTagCandidateHint,
+                folderMode,
+                focusedVocabularyHint,
+                geolocationContextText,
+                semanticHints
+            );
+            focusedMessages[0].content += " This focused pass resolves a disagreement with a strong local word-family match. Reconsider each pair from its labeled EVIDENCE and VAULT VALUE without influence from any omitted candidates; reject it if the meanings are not genuinely compatible.";
+            const focusedReview = await this.requestVaultCandidateReview(
+                disputedStrongItems,
+                focusedMessages,
+                vaultEvidenceText,
+                endpoint,
+                model,
+                "focused vault relationship review",
+                512
+            );
+            if (focusedReview) {
+                const selectionsById = new Map(candidateReview.selections.map(selection => [selection.id, selection]));
+                focusedReview.selections.forEach(selection => selectionsById.set(selection.id, selection));
+                const rejectedIds = new Set(candidateReview.rejectedIds);
+                focusedReview.selections.forEach(selection => rejectedIds.delete(selection.id));
+                focusedReview.rejectedIds.forEach(id => rejectedIds.add(id));
+                candidateReview = {
+                    selections: Array.from(selectionsById.values()),
+                    rejectedIds: Array.from(rejectedIds),
+                    complete: true,
+                };
             }
         }
+
+        const verifiedRelations: { evidence: string; candidate: string; relationType: string; confidence?: number }[] = [];
+        const modelProposedTerms = candidateReview.selections.map(selection => {
+            const promptItem = promptItemById.get(selection.id);
+            if (!promptItem) return null;
+            const term = promptItem.match.candidate;
+            const relationType = selection.relationType;
+            const relationEvidence = selection.evidence;
+            const relationConfidence = selection.confidence;
+            const normalizedConfidence = this.getLearnedVaultRelationConfidence(
+                relationType,
+                model,
+                relationConfidence,
+                Math.max(1, this.getIndependentVaultEvidenceChannelCount(resolveEvidenceChannels(relationEvidence))),
+                relationEvidence,
+                term
+            );
+            if (normalizedConfidence < this.settings.learnedVaultRelationMinimumConfidence) return null;
+            verifiedRelations.push({
+                evidence: relationEvidence,
+                candidate: term,
+                relationType,
+                confidence: relationConfidence,
+            });
+            return term;
+        }).filter((term): term is string => !!term);
+        const verifiedRelationshipJson = JSON.stringify({
+            relations: verifiedRelations.map(relation => ({
+                candidate: relation.candidate,
+                evidence: relation.evidence,
+                type: relation.relationType,
+                confidence: relation.confidence,
+            })),
+        });
+        relationshipChangesPending = this.rememberLearnedVaultRelations(
+            verifiedRelationshipJson,
+            modelProposedTerms,
+            vaultEvidenceText,
+            model,
+            resolveEvidenceChannels,
+            sourceFilePath
+        ) || relationshipChangesPending;
+        const aiAccepted = verifiedRelations
+            .filter(relation => {
+                const stored = this.getLearnedVaultRelation(relation.evidence, relation.candidate);
+                return !!stored && this.isLearnedVaultRelationReusable(stored);
+            })
+            .map(relation => relation.candidate);
+        const accepted = this.normalizeUniqueAiTags([...locallyAccepted, ...aiAccepted])
+            .slice(0, this.settings.maxVaultAwareAdditions);
+        const explicitlyRejectedMatches = candidateReview.rejectedIds
+            .map(id => promptItemById.get(id)?.match)
+            .filter((match): match is VaultCandidateMatch => !!match);
+        relationshipChangesPending = this.rememberRejectedVaultRelationships(
+            explicitlyRejectedMatches,
+            [],
+            model
+        ) || relationshipChangesPending;
         if (relationshipChangesPending) await this.persistVaultRelationshipChanges();
-        return this.normalizeUniqueAiTags(locallyAccepted).slice(0, this.settings.maxVaultAwareAdditions);
+        return accepted;
     }
     buildOllamaTagRequestVariants(
         model: string,
-        messages: { role: string; content: string }[]
+        messages: { role: string; content: string }[],
+        numPredict = 256,
+        temperature = 0.2
     ): Record<string, unknown>[] {
         const base = {
             model,
             stream: false,
             options: {
-                temperature: 0.2,
-                num_predict: 256,
+                temperature,
+                num_predict: numPredict,
             },
             messages,
         };
@@ -6126,6 +6903,7 @@ export default class AutotagPlugin extends Plugin {
         const runTimed = <T>(stage: string, task: () => Promise<T>): Promise<T> =>
             timings ? timings.measure(stage, task) : task();
         const filenameCandidates = this.getFilenameKeywordCandidates(file);
+        const filenameStopWordLearningCandidates = this.getFilenameStopWordLearningCandidates(file);
         const folderStrongTagCandidates = this.getFolderTagCandidates(folderStrongCandidateValues);
         const folderConsiderTagCandidates = this.getFolderTagCandidates(folderConsiderCandidateValues);
         const folderExcludedTagCandidates = this.getFolderTagCandidates(folderExcludedCandidateValues);
@@ -6197,7 +6975,8 @@ export default class AutotagPlugin extends Plugin {
             this.settings.filenameCandidateMode,
             folderTagCandidateHint,
             folderPromptMode,
-            geolocationContextText
+            geolocationContextText,
+            filenameStopWordLearningCandidates
         );
         const requestVariants = this.buildOllamaTagRequestVariants(model, messages);
 
@@ -6239,6 +7018,18 @@ export default class AutotagPlugin extends Plugin {
                 const tags = this.parseAiTags(rawText);
                 const vaultLookupHints = this.parseAiVaultLookupHints(rawText);
                 if (tags.length > 0 || this.isValidVaultAwarenessResponse(rawText)) {
+                    await this.rememberLearnedFilenameStopWords(
+                        rawText,
+                        filenameStopWordLearningCandidates,
+                        file?.path ?? "",
+                        model
+                    );
+                    const originalAiTags = this.filterUnsupportedCandidateEchoTags(
+                        tags.map(tag => this.normalizeAiTagName(tag)),
+                        descriptionText,
+                        activeFolderTagCandidates,
+                        geolocationContextText
+                    );
                     const canonicalTags = this.filterUnsupportedCandidateEchoTags(
                         tags.map(tag =>
                             this.canonicalizeVaultTerm(tag, this.settings.vaultLinguisticFeatures.canonicalization === "use")
@@ -6262,7 +7053,7 @@ export default class AutotagPlugin extends Plugin {
                         model
                     ));
                     const tagsWithBridges = [...canonicalTags, ...bridgeTags];
-                    const vaultTags = await runTimed("self-learning", () =>
+                    const vaultTags = await runTimed("adaptive-vault-matching", () =>
                         this.runVaultAwarenessSelection(() => this.selectVaultAwareTags(
                             tagsWithBridges,
                             descriptionText,
@@ -6275,7 +7066,8 @@ export default class AutotagPlugin extends Plugin {
                             endpoint,
                             model,
                             canonicalTags,
-                            vaultLookupHints
+                            vaultLookupHints,
+                            file?.path ?? ""
                         ))
                     );
                     const postVaultBridgeTags = this.settings.bridgeUsePreBridgeVaultAwarenessOutput
@@ -6293,10 +7085,14 @@ export default class AutotagPlugin extends Plugin {
                         activeFolderTagCandidates,
                         geolocationContextText
                     );
-                    const includeVaultAwarenessInAiTags = !this.settings.vaultAwarenessOutputEnabled || !this.settings.vaultAwarenessOutputExclusive;
-                    const aiTagInputs = includeVaultAwarenessInAiTags
-                        ? [...tagsWithBridges, ...vaultAwarenessTags]
+                    const baseAiTagOutput = this.settings.vaultAwarenessPreserveOriginalAiTags
+                        ? this.normalizeUniqueAiTags([...originalAiTags, ...bridgeTags])
                         : tagsWithBridges;
+                    const includeVaultAwarenessInAiTags = !this.settings.vaultAwarenessOutputEnabled
+                        || (!this.settings.vaultAwarenessPreserveOriginalAiTags && !this.settings.vaultAwarenessOutputExclusive);
+                    const aiTagInputs = includeVaultAwarenessInAiTags
+                        ? [...baseAiTagOutput, ...vaultAwarenessTags]
+                        : baseAiTagOutput;
                     const excludedVaultAwarenessTags = new Set(
                         includeVaultAwarenessInAiTags
                             ? []
@@ -6524,6 +7320,41 @@ export default class AutotagPlugin extends Plugin {
         }
     }
 
+    parseFilenameStopWordProposals(content: unknown): Array<{ word: string; confidence: number }> {
+        if (typeof content !== "string" || !content.trim()) return [];
+        const cleaned = this.stripThinkBlocks(content)
+            .replace(/^```(?:json)?\s*/i, "")
+            .replace(/\s*```$/i, "")
+            .trim();
+        try {
+            const jsonStart = cleaned.indexOf("{");
+            const jsonEnd = cleaned.lastIndexOf("}");
+            if (jsonStart === -1 || jsonEnd === -1) return [];
+            const parsed = JSON.parse(cleaned.slice(jsonStart, jsonEnd + 1));
+            if (!Array.isArray(parsed?.filenameStopWords)) return [];
+            const unique = new Map<string, { word: string; confidence: number }>();
+            parsed.filenameStopWords.forEach((value: unknown) => {
+                const rawWord = typeof value === "string"
+                    ? value
+                    : value && typeof value === "object" && typeof (value as { word?: unknown }).word === "string"
+                        ? (value as { word: string }).word
+                        : "";
+                const word = this.normalizeAiTagName(rawWord);
+                if (!word || word.includes(" ")) return;
+                const rawConfidence = value && typeof value === "object"
+                    ? (value as { confidence?: unknown }).confidence
+                    : 50;
+                const confidence = this.clampSetting(rawConfidence, 50, 0, 100);
+                const key = word.toLowerCase();
+                const existing = unique.get(key);
+                if (!existing || confidence > existing.confidence) unique.set(key, { word, confidence });
+            });
+            return Array.from(unique.values()).slice(0, 30);
+        } catch {
+            return [];
+        }
+    }
+
     isValidVaultAwarenessResponse(content: string): boolean {
         const cleaned = this.stripThinkBlocks(content)
             .replace(/^```(?:json)?\s*/i, "")
@@ -6537,7 +7368,10 @@ export default class AutotagPlugin extends Plugin {
             return !!parsed
                 && typeof parsed === "object"
                 && !Array.isArray(parsed)
-                && (Array.isArray(parsed.aitags) || Array.isArray(parsed.relations) || Array.isArray(parsed.vaultSelections));
+                && (Array.isArray(parsed.aitags)
+                    || Array.isArray(parsed.relations)
+                    || Array.isArray(parsed.vaultSelections)
+                    || Array.isArray(parsed.filenameStopWords));
         } catch {
             return false;
         }
@@ -6817,6 +7651,7 @@ export default class AutotagPlugin extends Plugin {
         const category = this.getFailureCategory(reason);
         if (category === "Companion note could not be created") {
             return [
+                "Open Fix / Recover, select the source under Search source file to process again, and use Process Again so the normal pipeline recreates the companion note.",
                 "Check that the Companion Note Folder points to the folder where companion notes should be created.",
                 "Check that Companion Note Name Format creates the expected note name for this image.",
                 "Increase Companion note creation retries in Processing & Queue if notes appear slowly or sync delays are involved.",
@@ -7675,6 +8510,7 @@ export default class AutotagPlugin extends Plugin {
         const folderConsiderCandidateValues: string[] = [];
         const folderExcludedCandidateValues: string[] = [];
         const folderGeneratedValues: string[] = [];
+        const folderMappings = this.getFolderPropertyMappings();
         const fallbackProperty = this.normalizeFolderFallbackProperty(this.settings.folderFallbackProperty);
         const addUnique = (values: string[], value: string) => {
             if (!values.includes(value)) values.push(value);
@@ -7721,14 +8557,14 @@ export default class AutotagPlugin extends Plugin {
 
         relevantParts.forEach(part => {
             let matchedPropertyList = false;
-            this.getFolderPropertyMappings().forEach(mapping => {
+            folderMappings.forEach(mapping => {
                 if (mapping.property && mapping.values.includes(part)) {
                     addFolderValue(mapping.property, part, mapping.format, this.getFolderMappingAiCandidateMode(mapping));
                     matchedPropertyList = true;
                 }
             });
 
-            if (!matchedPropertyList) {
+            if (!matchedPropertyList && this.settings.folderFallbackEnabled) {
                 addFolderValue(fallbackProperty, part, this.settings.folderFallbackFormat, this.getFolderFallbackAiCandidateMode());
             }
         });
@@ -7756,6 +8592,26 @@ export default class AutotagPlugin extends Plugin {
             .trim()
             .replace(/\s+/g, "-");
         return normalized.length > 0 ? normalized : fallback;
+    }
+
+    normalizeAdditionalVaultVocabularyProperties(value: unknown): AdditionalVaultVocabularyProperty[] {
+        if (!Array.isArray(value)) return [];
+        const seenIds = new Set<string>();
+        return value
+            .filter(source => source && typeof source === "object" && !Array.isArray(source))
+            .map((source, index) => {
+                const raw = source as Partial<AdditionalVaultVocabularyProperty>;
+                let id = typeof raw.id === "string" && raw.id.trim()
+                    ? raw.id.trim()
+                    : `vault-source-${Date.now()}-${index}`;
+                while (seenIds.has(id)) id = `${id}-${index}`;
+                seenIds.add(id);
+                return {
+                    id,
+                    property: this.normalizePropertyName(typeof raw.property === "string" ? raw.property : "", ""),
+                    useAsVaultCandidate: raw.useAsVaultCandidate !== false,
+                };
+            });
     }
 
     getLinkToFilePropertyName(): string {
@@ -8188,7 +9044,9 @@ export default class AutotagPlugin extends Plugin {
             this.getFolderPropertyMappings().forEach(mapping => {
                 properties.add(this.normalizeFolderFallbackProperty(mapping.property));
             });
-            properties.add(this.normalizeFolderFallbackProperty(this.settings.folderFallbackProperty));
+            if (this.settings.folderFallbackEnabled) {
+                properties.add(this.normalizeFolderFallbackProperty(this.settings.folderFallbackProperty));
+            }
         }
 
         if (this.settings.geolocationEnabled) {
@@ -8245,6 +9103,7 @@ export default class AutotagPlugin extends Plugin {
                     field,
                     property: this.normalizePropertyName(mapping?.property, this.getDefaultGeolocationPropertyName(field)),
                     format: typeof mapping?.format === "string" ? mapping.format : "",
+                    useAsVaultCandidate: mapping?.useAsVaultCandidate === true,
                 };
             })
             .filter(mapping => {
@@ -8269,8 +9128,21 @@ ${mapping.property}`;
         items[normalizedProperty] = values;
     }
 
+    getGeolocationResultLanguage(): string {
+        const configured = this.settings.geolocationResultLanguage.trim() || DEFAULT_SETTINGS.geolocationResultLanguage;
+        const configuredKey = configured.toLowerCase();
+        const knownLanguage = GEOLOCATION_LANGUAGE_OPTIONS.find(option =>
+            option.name.toLowerCase() === configuredKey
+            || option.code.toLowerCase() === configuredKey
+            || `${option.name} (${option.code})`.toLowerCase() === configuredKey
+        );
+        if (knownLanguage) return knownLanguage.code;
+        const labelledCode = configured.match(/\(([a-z]{2,3}(?:-[a-z0-9]{2,8})?)\)\s*$/i)?.[1];
+        return labelledCode || configured;
+    }
+
     getGeocodeCacheKey(latitude: number, longitude: number): string {
-        return `${latitude.toFixed(5)},${longitude.toFixed(5)}`;
+        return `${this.getGeolocationResultLanguage().toLowerCase()}|${latitude.toFixed(5)},${longitude.toFixed(5)}`;
     }
 
     getTodayKey(): string {
@@ -8369,12 +9241,14 @@ ${mapping.property}`;
         const baseUrl = this.settings.geolocationProvider === "local-nominatim"
             ? (this.settings.geolocationLocalUrl?.trim() || DEFAULT_SETTINGS.geolocationLocalUrl)
             : "https://nominatim.openstreetmap.org";
-        const url = `${baseUrl.replace(/\/+$/, "")}/reverse?format=jsonv2&addressdetails=1&lat=${encodeURIComponent(String(coordinates.latitude))}&lon=${encodeURIComponent(String(coordinates.longitude))}`;
+        const resultLanguage = this.getGeolocationResultLanguage();
+        const url = `${baseUrl.replace(/\/+$/, "")}/reverse?format=jsonv2&addressdetails=1&accept-language=${encodeURIComponent(resultLanguage)}&lat=${encodeURIComponent(String(coordinates.latitude))}&lon=${encodeURIComponent(String(coordinates.longitude))}`;
         const response = await requestUrl({
             url,
             method: "GET",
             headers: {
                 "Accept": "application/json",
+                "Accept-Language": resultLanguage,
                 "User-Agent": "autotag Obsidian Plugin (personal geolocation lookup)",
             },
             throw: false,
@@ -9173,7 +10047,9 @@ ${frontmatterLines}
             this.getFolderPropertyMappings().forEach(mapping => {
                 filledProperties.add(this.normalizeFolderFallbackProperty(mapping.property));
             });
-            filledProperties.add(this.normalizeFolderFallbackProperty(this.settings.folderFallbackProperty));
+            if (this.settings.folderFallbackEnabled) {
+                filledProperties.add(this.normalizeFolderFallbackProperty(this.settings.folderFallbackProperty));
+            }
         }
 
         if (this.settings.geolocationEnabled) {
@@ -9257,7 +10133,9 @@ ${frontmatterLines}
             this.getFolderPropertyMappings().forEach(mapping => {
                 properties.add(this.normalizeFolderFallbackProperty(mapping.property));
             });
-            properties.add(this.normalizeFolderFallbackProperty(this.settings.folderFallbackProperty));
+            if (this.settings.folderFallbackEnabled) {
+                properties.add(this.normalizeFolderFallbackProperty(this.settings.folderFallbackProperty));
+            }
         }
 
         if (this.settings.geolocationEnabled) {
@@ -9492,8 +10370,9 @@ ${frontmatterLines}
         let processingOutcome: "completed" | "failed" | "skipped" = "skipped";
         try {
             let notePath = this.activeRunPairs.get(runId)?.expectedNotePath ?? this.getCompanionNotePath(file);
+            const companionWasMissing = !(this.findCompanionNoteForSourceFile(file) instanceof TFile);
             await this.saveProtectedJob(filePath, { stage: "companion-note", notePath, runId });
-            const companionNote = await timings.measure("companion-note", () => this.createMissingCompanionNote(file, notePath));
+            const companionNote = await timings.measure("companion-note", () => this.createMissingCompanionNote(file, notePath, false));
             if (!this.isCurrentRun(filePath, runId)) return;
             if (companionNote) {
                 notePath = companionNote.path;
@@ -9694,6 +10573,9 @@ ${frontmatterLines}
                 this.settings.processedFiles.push(finalProcessedPath);
             }
             await timings.measure("final-persistence", () => this.saveSettings());
+            if (companionWasMissing && this.getVaultFileByPathFlexible(finalNotePath) instanceof TFile) {
+                new Notice(`Autotag created companion note: ${finalNotePath.split("/").pop() ?? finalNotePath}`);
+            }
             processingOutcome = "completed";
         } catch (e) {
             processingOutcome = "failed";
@@ -9786,7 +10668,10 @@ ${frontmatterLines}
                 if (!(file instanceof TFile)) return;
                 this.invalidateExpensiveHealthCounts();
                 if (this.isDeletionSuppressed(file.path)) {
-                    if (file.extension.toLowerCase() === "md") {
+                    const activePair = this.getActiveRunPairForPath(file.path);
+                    const suppressedRunId = this.getPathKeyValue(this.deletionSuppressedRunIds, file.path);
+                    const wasDeletedDuringActiveRun = !!activePair && suppressedRunId === activePair.runId;
+                    if (file.extension.toLowerCase() === "md" && (!activePair || wasDeletedDuringActiveRun)) {
                         this.deletionCascadePaths.add(file.path);
                         try {
                             await this.app.vault.delete(file);
@@ -9798,7 +10683,9 @@ ${frontmatterLines}
                     }
 
                     this.clearDeletionSuppression(file.path);
-                    this.clearDeletionSuppression(this.getCompanionNotePath(file));
+                    if (file.extension.toLowerCase() !== "md") {
+                        this.clearDeletionSuppression(this.getCompanionNotePath(file));
+                    }
                 }
                 const fileToProcess = await this.moveNewFileIntoBasePathIfNeeded(file);
                 if (fileToProcess instanceof TFile) {
@@ -9964,6 +10851,8 @@ ${frontmatterLines}
         }
 
         this.queueBatchStartedAt = null;
+        this.deletionSuppressionTimers.forEach(timer => window.clearTimeout(timer));
+        this.deletionSuppressionTimers.clear();
         this.processingQueue.clear();
         this.activeWorkerPaths.clear();
         this.activeRunPairs.clear();
@@ -10109,6 +10998,9 @@ ${frontmatterLines}
         delete migrated.manualEnrichmentRules;
         delete migrated.manualSubjectBridgeRules;
         delete migrated.clearDropdownExcludedProperties;
+        delete migrated.linkToFileUseAsVaultCandidate;
+        delete migrated.fileTypeUseAsVaultCandidate;
+        delete migrated.embedUseAsVaultCandidate;
 
         return migrated as Partial<AutotagSettings>;
     }
@@ -10404,10 +11296,18 @@ ${frontmatterLines}
             this.settings.folderPropertyManualValueMemory = this.normalizeFolderPropertyManualValueMemory(
                 this.settings.folderPropertyManualValueMemory
             );
+            this.settings.additionalVaultVocabularyProperties = this.normalizeAdditionalVaultVocabularyProperties(
+                this.settings.additionalVaultVocabularyProperties
+            );
+            this.settings.geolocationProperties = this.getGeolocationProperties();
             this.rememberManualFolderPropertyValuesFromMappings();
+            this.refreshAutomaticFolderPropertyMappings(true);
+            this.synchronizeOverlappingVaultVocabularySources();
             this.settings.settingsProfileId = profile.id;
             this.settingsProfileSnapshot = this.serializeSettingsProfileSettings(this.settings);
             await this.saveData(this.settings);
+            this.invalidateExpensiveHealthCounts();
+            this.scheduleVaultVocabularyCacheBuild(0);
             new Notice(`Selected setup profile: ${profile.name}`);
         } finally {
             this.isApplyingSettingsProfile = false;
@@ -10645,6 +11545,7 @@ ${frontmatterLines}
             this.settings.folderPropertyManualValueMemory
         );
         this.rememberManualFolderPropertyValuesFromMappings();
+        this.settings.folderFallbackEnabled = this.settings.folderFallbackEnabled === true;
         this.settings.folderFallbackProperty = this.normalizeFolderFallbackProperty(this.settings.folderFallbackProperty);
         this.settings.folderFallbackFormat = typeof this.settings.folderFallbackFormat === "string" ? this.settings.folderFallbackFormat : DEFAULT_SETTINGS.folderFallbackFormat;
         this.settings.folderFallbackAiCandidateMode = this.normalizeCandidateMode(
@@ -10655,6 +11556,9 @@ ${frontmatterLines}
         );
         this.settings.folderFallbackUseAsAiCandidate = this.isCandidateSourceActive(this.settings.folderFallbackAiCandidateMode);
         this.settings.folderFallbackUseAsVaultCandidate = this.settings.folderFallbackUseAsVaultCandidate === true;
+        this.settings.additionalVaultVocabularyProperties = this.normalizeAdditionalVaultVocabularyProperties(
+            this.settings.additionalVaultVocabularyProperties
+        );
         if (this.settings.templateSource !== "internal" && this.settings.templateSource !== "template-file") {
             this.settings.templateSource = DEFAULT_SETTINGS.templateSource;
         }
@@ -10677,6 +11581,9 @@ ${frontmatterLines}
         this.settings.geolocationLocalUrl = typeof this.settings.geolocationLocalUrl === "string" && this.settings.geolocationLocalUrl.trim()
             ? this.settings.geolocationLocalUrl.trim()
             : DEFAULT_SETTINGS.geolocationLocalUrl;
+        this.settings.geolocationResultLanguage = typeof this.settings.geolocationResultLanguage === "string" && this.settings.geolocationResultLanguage.trim()
+            ? this.settings.geolocationResultLanguage.trim()
+            : DEFAULT_SETTINGS.geolocationResultLanguage;
         this.settings.geolocationProperties = this.getGeolocationProperties();
         if (this.settings.geolocationProperties.length === 0) {
             this.settings.geolocationProperties = [...DEFAULT_SETTINGS.geolocationProperties];
@@ -10743,6 +11650,48 @@ ${frontmatterLines}
             this.settings.filenameCandidateMode = DEFAULT_SETTINGS.filenameCandidateMode;
         }
         this.settings.filenameCandidatesHumanReadableOnly = this.settings.filenameCandidatesHumanReadableOnly !== false;
+        this.settings.filenameFillerWordsEnabled = this.settings.filenameFillerWordsEnabled !== false;
+        const learnedFilenameStopWordKeys = new Set<string>();
+        this.settings.learnedFilenameStopWords = Array.isArray(this.settings.learnedFilenameStopWords)
+            ? this.settings.learnedFilenameStopWords
+                .filter(entry => entry && typeof entry.word === "string")
+                .map(entry => {
+                    const word = this.normalizeAiTagName(entry.word);
+                    const status: LearnedFilenameStopWordStatus = entry.status === "accepted" || entry.status === "rejected"
+                        ? entry.status
+                        : "provisional";
+                    const confirmationFileKeys = Array.isArray(entry.confirmationFileKeys)
+                        ? Array.from(new Set(entry.confirmationFileKeys.filter(key => typeof key === "string" && key.trim())))
+                        : [];
+                    const modelConfidence = this.clampSetting(entry.modelConfidence, 50, 0, 100);
+                    return {
+                        word,
+                        modelConfidence: status === "accepted" ? 100 : modelConfidence,
+                        confidence: status === "accepted"
+                            ? 100
+                            : this.getLearnedFilenameStopWordConfidence(modelConfidence, confirmationFileKeys.length),
+                        status,
+                        confirmationFileKeys,
+                        model: typeof entry.model === "string" ? entry.model : "",
+                        createdAt: typeof entry.createdAt === "number" ? entry.createdAt : Date.now(),
+                        lastSeenAt: typeof entry.lastSeenAt === "number" ? entry.lastSeenAt : Date.now(),
+                    };
+                })
+                .filter(entry => {
+                    const key = entry.word.toLowerCase();
+                    if (!entry.word || entry.word.includes(" ") || learnedFilenameStopWordKeys.has(key)) return false;
+                    learnedFilenameStopWordKeys.add(key);
+                    return true;
+                })
+                .sort((a, b) => {
+                    if (a.status !== b.status) {
+                        const order: Record<LearnedFilenameStopWordStatus, number> = { accepted: 0, provisional: 1, rejected: 2 };
+                        return order[a.status] - order[b.status];
+                    }
+                    return b.confidence - a.confidence || a.word.localeCompare(b.word);
+                })
+                .slice(0, 1000)
+            : [];
         this.settings.bridgeUsePreBridgeVaultAwarenessOutput = this.settings.bridgeUsePreBridgeVaultAwarenessOutput !== false;
         this.settings.learnedVaultRelationCacheLimit = this.clampSetting(
             this.settings.learnedVaultRelationCacheLimit,
@@ -10760,25 +11709,55 @@ ${frontmatterLines}
         this.settings.learnedVaultRelations = Array.isArray(this.settings.learnedVaultRelations)
             ? this.settings.learnedVaultRelations
                 .filter(relation => relation && typeof relation.evidence === "string" && typeof relation.candidate === "string")
-                .map(relation => ({
-                    evidence: this.normalizeAiTagName(relation.evidence),
-                    candidate: this.normalizeAiTagName(relation.candidate),
-                    relationType: typeof relation.relationType === "string" && relation.relationType.trim()
-                        ? relation.relationType.trim().toLowerCase()
-                        : "related",
-                    model: typeof relation.model === "string" ? relation.model : "",
-                    confidence: this.getLearnedVaultRelationConfidence(
-                        typeof relation.relationType === "string" ? relation.relationType : "related",
-                        typeof relation.model === "string" ? relation.model : "",
-                        relation.confidence,
-                        this.clampSetting(relation.confirmations, 1, 1, Number.MAX_SAFE_INTEGER)
-                    ),
-                    pinned: relation.pinned === true,
-                    confirmations: this.clampSetting(relation.confirmations, 1, 1, Number.MAX_SAFE_INTEGER),
-                    createdAt: typeof relation.createdAt === "number" ? relation.createdAt : Date.now(),
-                    lastConfirmedAt: typeof relation.lastConfirmedAt === "number" ? relation.lastConfirmedAt : Date.now(),
-                    lastUsedAt: typeof relation.lastUsedAt === "number" ? relation.lastUsedAt : 0,
-                }))
+                .map(relation => {
+                    const evidence = this.normalizeAiTagName(relation.evidence);
+                    const candidate = this.normalizeAiTagName(relation.candidate);
+                    const relationType = this.normalizeLearnedVaultRelationType(relation.relationType);
+                    const model = typeof relation.model === "string" ? relation.model : "";
+                    const evidenceChannels = Array.isArray(relation.evidenceChannels)
+                        ? Array.from(new Set(relation.evidenceChannels.filter(channel =>
+                            ["folder", "filename", "geolocation", "aiTags", "description", "semantic", "structural", "learned", "manual"].includes(channel)
+                        )))
+                        : [];
+                    const loadedFileKeys = Array.isArray(relation.confirmationFileKeys)
+                        ? Array.from(new Set(relation.confirmationFileKeys.filter(key => typeof key === "string" && key.trim())))
+                        : [];
+                    const hasTrackedIndependentSupport = evidenceChannels.length > 0 || loadedFileKeys.length > 0;
+                    const confirmationFileKeys = loadedFileKeys.length > 0
+                        ? loadedFileKeys
+                        : [`legacy-${this.getVaultRelationFileKey(`${evidence}\n${candidate}`)}`];
+                    const confirmations = Math.max(
+                        1,
+                        hasTrackedIndependentSupport ? this.getIndependentVaultEvidenceChannelCount(evidenceChannels) : 1,
+                        confirmationFileKeys.length
+                    );
+                    const modelConfidence = Number.isFinite(Number(relation.modelConfidence))
+                        ? this.clampSetting(relation.modelConfidence, 50, 0, 100)
+                        : this.clampSetting(relation.confidence, 50, 0, 100);
+                    const pinned = relation.pinned === true;
+                    return {
+                        evidence,
+                        candidate,
+                        relationType,
+                        model,
+                        modelConfidence,
+                        confidence: pinned ? 100 : this.getLearnedVaultRelationConfidence(
+                            relationType,
+                            model,
+                            modelConfidence,
+                            confirmations,
+                            evidence,
+                            candidate
+                        ),
+                        pinned,
+                        confirmations,
+                        evidenceChannels,
+                        confirmationFileKeys,
+                        createdAt: typeof relation.createdAt === "number" ? relation.createdAt : Date.now(),
+                        lastConfirmedAt: typeof relation.lastConfirmedAt === "number" ? relation.lastConfirmedAt : Date.now(),
+                        lastUsedAt: typeof relation.lastUsedAt === "number" ? relation.lastUsedAt : 0,
+                    };
+                })
                 .filter(relation => relation.confidence >= this.settings.learnedVaultRelationMinimumConfidence)
                 .filter(relation => {
                     if (!relation.evidence || !relation.candidate) return false;
@@ -10863,8 +11842,10 @@ ${frontmatterLines}
         );
         this.settings.vaultAwarenessOutputEnabled = this.settings.vaultAwarenessOutputEnabled === true;
         this.settings.vaultAwarenessOutputPropertyName = this.normalizePropertyName(this.settings.vaultAwarenessOutputPropertyName, DEFAULT_SETTINGS.vaultAwarenessOutputPropertyName);
+        this.settings.vaultAwarenessOutputUseAsVaultCandidate = this.settings.vaultAwarenessOutputUseAsVaultCandidate === true;
         this.settings.vaultAwarenessOutputFormat = typeof this.settings.vaultAwarenessOutputFormat === "string" ? this.settings.vaultAwarenessOutputFormat : DEFAULT_SETTINGS.vaultAwarenessOutputFormat;
         this.settings.vaultAwarenessOutputExclusive = this.settings.vaultAwarenessOutputExclusive === true;
+        this.settings.vaultAwarenessPreserveOriginalAiTags = this.settings.vaultAwarenessPreserveOriginalAiTags !== false;
         this.settings.hideLimitedFileTypeWarnings = this.settings.hideLimitedFileTypeWarnings !== false;
         const loadedLimitedFileTypeWarningSkips = this.settings.limitedFileTypeWarningSkips;
         const normalizedLimitedFileTypeWarningSkips: Record<string, boolean> = {};
@@ -10891,6 +11872,8 @@ ${frontmatterLines}
         this.settings.removeGeolocationFromAiTags = this.settings.removeGeolocationFromAiTags !== false;
         this.settings.aiTagsUseAsVaultCandidate = this.settings.aiTagsUseAsVaultCandidate !== false;
         this.settings.aiDescriptionPropertyName = this.normalizePropertyName(this.settings.aiDescriptionPropertyName, DEFAULT_SETTINGS.aiDescriptionPropertyName);
+        this.settings.aiDescriptionUseAsVaultCandidate = this.settings.aiDescriptionUseAsVaultCandidate === true;
+        this.synchronizeOverlappingVaultVocabularySources();
         const hasMergedGeolocationAiSetting = !!loadedSettings
             && Object.prototype.hasOwnProperty.call(loadedSettings, "useGeolocationForAiTags");
         const useGeolocationForAi = hasMergedGeolocationAiSetting
@@ -11650,7 +12633,7 @@ class LearnedRelationshipsReviewModal extends Modal {
         contentEl.empty();
         contentEl.createEl("h2", { text: "Review learned relationships" });
         contentEl.createEl("p", {
-            text: "Search accepted mappings, surface uncertain entries by confidence, and manage each relationship without editing the generated operational file.",
+            text: "Search retained mappings, distinguish reusable relationships from provisional ones, and manage each relationship without editing the generated operational file.",
             cls: "setting-item-description",
         });
 
@@ -11698,7 +12681,8 @@ class LearnedRelationshipsReviewModal extends Modal {
             })
             .sort((a, b) => a.confidence - b.confidence || a.candidate.localeCompare(b.candidate));
 
-        this.summaryEl.setText(`Showing ${relations.length} of ${allRelations.length} accepted relationship${allRelations.length === 1 ? "" : "s"}. Retention threshold: ${this.plugin.settings.learnedVaultRelationMinimumConfidence}%.`);
+        const reusableCount = allRelations.filter(relation => this.plugin.isLearnedVaultRelationReusable(relation)).length;
+        this.summaryEl.setText(`Showing ${relations.length} of ${allRelations.length} retained relationship${allRelations.length === 1 ? "" : "s"}. ${reusableCount} reusable, ${allRelations.length - reusableCount} provisional. Retention threshold: ${this.plugin.settings.learnedVaultRelationMinimumConfidence}%.`);
         this.listEl.empty();
         if (relations.length === 0) {
             this.listEl.createEl("p", {
@@ -11716,16 +12700,27 @@ class LearnedRelationshipsReviewModal extends Modal {
                 text: `${relation.confidence}%`,
                 cls: "autotag-relationship-confidence",
             });
-            confidenceEl.addClass(relation.confidence >= 85
+            confidenceEl.addClass(relation.confidence >= 90
                 ? "is-high"
                 : relation.confidence >= this.plugin.settings.learnedVaultRelationMinimumConfidence ? "is-medium" : "is-low");
             if (relation.pinned) headingEl.createEl("span", { text: "Kept", cls: "autotag-relationship-kept" });
+            const reusable = this.plugin.isLearnedVaultRelationReusable(relation);
+            headingEl.createEl("span", {
+                text: reusable ? "Reusable" : "Provisional",
+                cls: reusable ? "autotag-relationship-kept" : "autotag-relationship-confidence is-medium",
+            });
             const metadataEl = itemEl.createDiv({ cls: "autotag-relationship-review-metadata" });
+            const supportCount = this.plugin.getLearnedVaultRelationSupportCount(relation);
             [
                 relation.relationType.replace(/-/g, " "),
-                `${relation.confirmations} confirmation${relation.confirmations === 1 ? "" : "s"}`,
+                `${supportCount} independent support${supportCount === 1 ? "" : "s"}`,
+                ...(relation.relationType === "compound"
+                    ? [this.plugin.getCompoundRelationshipDirection(relation.evidence, relation.candidate).replace(/-/g, " ")]
+                    : []),
                 relation.model || "unknown model",
-                `Last used ${new Date(relation.lastUsedAt || relation.lastConfirmedAt).toLocaleString()}`,
+                relation.lastUsedAt
+                    ? `Last used ${new Date(relation.lastUsedAt).toLocaleString()}`
+                    : `Last confirmed ${new Date(relation.lastConfirmedAt).toLocaleString()}`,
             ].forEach(value => metadataEl.createEl("span", { text: value }));
 
             new Setting(itemEl)
@@ -11766,6 +12761,140 @@ class LearnedRelationshipsReviewModal extends Modal {
                         await this.plugin.removeLearnedVaultRelation(relation.evidence, relation.candidate);
                         await this.onChanged();
                         this.renderRelationships();
+                    }));
+        });
+    }
+
+    onClose(): void {
+        this.contentEl.empty();
+        this.modalEl.removeClass("autotag-relationship-review-modal");
+    }
+}
+
+class LearnedFilenameStopWordsReviewModal extends Modal {
+    private query = "";
+    private summaryEl: HTMLElement | null = null;
+    private listEl: HTMLElement | null = null;
+
+    constructor(
+        app: App,
+        private readonly plugin: AutotagPlugin,
+        private readonly onChanged: () => void | Promise<void>
+    ) {
+        super(app);
+    }
+
+    onOpen(): void {
+        const { contentEl, modalEl } = this;
+        modalEl.addClass("autotag-relationship-review-modal");
+        contentEl.empty();
+        contentEl.createEl("h2", { text: "Review learned filename filler words" });
+        contentEl.createEl("p", {
+            text: "Review filename words proposed as reusable filler. A provisional word is filtered automatically only after two different files support it; accepting trusts it immediately, rejecting keeps it blocked from relearning, and deleting lets it be proposed again.",
+            cls: "setting-item-description",
+        });
+
+        const filtersEl = contentEl.createDiv({ cls: "autotag-relationship-review-filters" });
+        new Setting(filtersEl)
+            .setName("Word search")
+            .setDesc("Search the learned word, status, or model.")
+            .addText(text => text
+                .setPlaceholder("final, export, original...")
+                .onChange(value => {
+                    this.query = value.trim().toLowerCase();
+                    this.renderEntries();
+                }));
+
+        this.summaryEl = contentEl.createEl("p", { cls: "setting-item-description autotag-relationship-review-summary" });
+        this.listEl = contentEl.createDiv({ cls: "autotag-relationship-review-list" });
+        this.renderEntries();
+    }
+
+    private getStatusLabel(entry: LearnedFilenameStopWord): string {
+        if (entry.status === "accepted") return "Accepted";
+        if (entry.status === "rejected") return "Rejected";
+        return this.plugin.isLearnedFilenameStopWordReusable(entry) ? "Reusable" : "Provisional";
+    }
+
+    private renderEntries(): void {
+        if (!this.summaryEl || !this.listEl) return;
+        const allEntries = [...this.plugin.settings.learnedFilenameStopWords];
+        const entries = allEntries
+            .filter(entry => {
+                if (!this.query) return true;
+                return [entry.word, entry.status, entry.model, this.getStatusLabel(entry)]
+                    .some(value => value.toLowerCase().includes(this.query));
+            })
+            .sort((a, b) => {
+                const statusOrder: Record<LearnedFilenameStopWordStatus, number> = { provisional: 0, accepted: 1, rejected: 2 };
+                return statusOrder[a.status] - statusOrder[b.status]
+                    || a.confidence - b.confidence
+                    || a.word.localeCompare(b.word);
+            });
+        const reusableCount = allEntries.filter(entry => this.plugin.isLearnedFilenameStopWordReusable(entry)).length;
+        const rejectedCount = allEntries.filter(entry => entry.status === "rejected").length;
+        this.summaryEl.setText(`Showing ${entries.length} of ${allEntries.length} learned word${allEntries.length === 1 ? "" : "s"}. ${reusableCount} currently reusable; ${rejectedCount} rejected.`);
+        this.listEl.empty();
+        if (entries.length === 0) {
+            this.listEl.createEl("p", {
+                text: allEntries.length === 0 ? "No filename filler words have been learned yet." : "No learned words match this search.",
+                cls: "setting-item-description",
+            });
+            return;
+        }
+
+        entries.forEach(entry => {
+            const itemEl = this.listEl!.createDiv({ cls: "autotag-relationship-review-item" });
+            const headingEl = itemEl.createDiv({ cls: "autotag-relationship-review-heading" });
+            headingEl.createEl("strong", { text: entry.word });
+            const confidenceEl = headingEl.createEl("span", {
+                text: `${entry.confidence}%`,
+                cls: "autotag-relationship-confidence",
+            });
+            confidenceEl.addClass(entry.confidence >= 90 ? "is-high" : entry.confidence >= 80 ? "is-medium" : "is-low");
+            const statusLabel = this.getStatusLabel(entry);
+            headingEl.createEl("span", {
+                text: statusLabel,
+                cls: entry.status === "rejected"
+                    ? "autotag-relationship-confidence is-low"
+                    : this.plugin.isLearnedFilenameStopWordReusable(entry)
+                        ? "autotag-relationship-kept"
+                        : "autotag-relationship-confidence is-medium",
+            });
+            const metadataEl = itemEl.createDiv({ cls: "autotag-relationship-review-metadata" });
+            [
+                `${entry.confirmationFileKeys.length} distinct file${entry.confirmationFileKeys.length === 1 ? "" : "s"}`,
+                entry.model || "unknown model",
+                `Last seen ${new Date(entry.lastSeenAt).toLocaleString()}`,
+            ].forEach(value => metadataEl.createEl("span", { text: value }));
+
+            new Setting(itemEl)
+                .addButton(button => button
+                    .setIcon("check")
+                    .setTooltip(entry.status === "accepted" ? "Already accepted" : "Accept and filter this word immediately")
+                    .setDisabled(entry.status === "accepted")
+                    .onClick(async () => {
+                        await this.plugin.acceptLearnedFilenameStopWord(entry.word);
+                        await this.onChanged();
+                        this.renderEntries();
+                    }))
+                .addButton(button => button
+                    .setIcon("x")
+                    .setTooltip(entry.status === "rejected" ? "Already rejected" : "Reject and prevent this word from being learned again")
+                    .setDisabled(entry.status === "rejected")
+                    .onClick(async () => {
+                        await this.plugin.rejectLearnedFilenameStopWord(entry.word);
+                        await this.onChanged();
+                        this.renderEntries();
+                    }))
+                .addButton(button => button
+                    .setIcon("trash")
+                    .setTooltip("Delete this decision and allow the word to be proposed again")
+                    .setWarning()
+                    .onClick(async () => {
+                        await this.plugin.removeLearnedFilenameStopWord(entry.word);
+                        await this.onChanged();
+                        this.renderEntries();
                     }));
         });
     }
@@ -12183,6 +13312,7 @@ class AutotagSettingTab extends PluginSettingTab {
         if (this.plugin.settings.aiTagsPropertyEnabled) add(this.plugin.getAiTagsPropertyName());
         if (this.plugin.settings.aiDescriptionPropertyEnabled) add(this.plugin.getAiDescriptionPropertyName());
         if (this.plugin.settings.vaultAwarenessOutputEnabled) add(this.plugin.getVaultAwarenessOutputPropertyName());
+        this.plugin.settings.additionalVaultVocabularyProperties.forEach(source => add(source.property));
         if (this.plugin.settings.geolocationEnabled) this.plugin.getGeolocationPropertyNames().forEach(add);
 
         return this.dedupePropertyNames(Array.from(properties));
@@ -12197,10 +13327,10 @@ class AutotagSettingTab extends PluginSettingTab {
     }
 
     getPropertyConfigurationLocations(property: string): { label: string; sectionId: string; anchorId: string }[] {
-        const target = property.trim();
+        const target = property.trim().toLowerCase();
         const locations: { label: string; sectionId: string; anchorId: string }[] = [];
         const add = (candidate: string, label: string, sectionId: string, anchorId: string) => {
-            if (candidate.trim() === target) locations.push({ label, sectionId, anchorId });
+            if (candidate.trim().toLowerCase() === target) locations.push({ label, sectionId, anchorId });
         };
 
         if (this.plugin.settings.linkToFilePropertyEnabled) {
@@ -12255,6 +13385,14 @@ class AutotagSettingTab extends PluginSettingTab {
                 "autotag-vault-awareness-output-property"
             );
         }
+        this.plugin.settings.additionalVaultVocabularyProperties.forEach((source, index) => {
+            add(
+                source.property,
+                `Vault Awareness > Vocabulary Source ${index + 1}`,
+                "vault-awareness",
+                `autotag-vault-vocabulary-source-${source.id}`
+            );
+        });
 
         return locations;
     }
@@ -12327,6 +13465,13 @@ class AutotagSettingTab extends PluginSettingTab {
             this.applyRecentlyAddedPanelHighlight(propertyPanelEl, "folder-property", mapping.id);
             propertyPanelEl.createEl("h5", { text: `Folder Property ${index + 1}` });
 
+            const mappingVaultOverlapHostEl = propertyPanelEl.createDiv();
+            const renderMappingVaultOverlapNotice = () => {
+                mappingVaultOverlapHostEl.empty();
+                this.renderVaultVocabularyOverlapNotice(mappingVaultOverlapHostEl, mapping.property, `folder:${mapping.id}`);
+            };
+            renderMappingVaultOverlapNotice();
+
             let renderValuesSetting: () => void = () => undefined;
             const updateMappingProperty = async (value: string) => {
                 if (mapping.valueSource === "manual") {
@@ -12338,9 +13483,12 @@ class AutotagSettingTab extends PluginSettingTab {
                 } else {
                     mapping.values = this.plugin.getRememberedFolderPropertyManualValues(mapping.property) ?? [];
                 }
+                this.plugin.synchronizeOverlappingVaultVocabularySources();
                 await this.plugin.saveSettings();
                 if (mapping.useAsVaultCandidate) this.plugin.scheduleVaultVocabularyCacheBuild();
                 renderValuesSetting();
+                this.syncRenderedVaultVocabularyControls();
+                this.refreshRenderedVaultVocabularyOverlapNotices();
             };
             const setting = new Setting(propertyPanelEl)
                 .setName("Property")
@@ -12488,17 +13636,30 @@ class AutotagSettingTab extends PluginSettingTab {
             renderMappingAiWarning();
 
             let mappingVaultWarningHostEl: HTMLElement | null = null;
+            const getMappingVaultWarningState = () => {
+                const title = this.hasGeneratedVocabularyOutputOverlap(mapping.property)
+                    ? "Potential feedback loop"
+                    : "Vault Awareness is off";
+                const lines = this.getVaultVocabularyAdvancedWarningLines(
+                    this.plugin.isVaultVocabularyPropertyEnabled(mapping.property),
+                    this.plugin.settings.vaultAwarenessEnabled,
+                    "property",
+                    mapping.property
+                );
+                return { title, lines };
+            };
+            const getMappingVaultWarningSignature = () => {
+                const state = getMappingVaultWarningState();
+                return JSON.stringify([state.title, state.lines]);
+            };
             const renderMappingVaultWarning = () => {
                 if (!mappingVaultWarningHostEl) return;
                 mappingVaultWarningHostEl.empty();
+                const state = getMappingVaultWarningState();
                 this.renderInlineDependencyWarning(
                     mappingVaultWarningHostEl,
-                    "Advanced vocabulary source",
-                    this.getVaultVocabularyAdvancedWarningLines(
-                        mapping.useAsVaultCandidate,
-                        this.plugin.settings.vaultAwarenessEnabled,
-                        "property"
-                    ),
+                    state.title,
+                    state.lines,
                     this.getSettingsSectionIcon("vault-awareness")
                 );
             };
@@ -12506,15 +13667,27 @@ class AutotagSettingTab extends PluginSettingTab {
             renderMappingVaultWarning();
             this.setSettingNameWithIcon(
                 new Setting(propertyPanelEl)
-                    .setDesc("Scans this property across the whole vault. Every existing frontmatter value found there can become known vocabulary for Vault Awareness, not only values from the file currently being processed.")
-                    .addToggle(toggle => toggle
-                        .setValue(mapping.useAsVaultCandidate)
-                        .onChange(async value => {
-                            mapping.useAsVaultCandidate = value;
-                            await this.plugin.saveSettings();
-                            this.plugin.scheduleVaultVocabularyCacheBuild();
-                            this.animateInlineDependencyWarning(mappingVaultWarningHostEl!, renderMappingVaultWarning);
-                        })),
+                    .setDesc("Indexes values already saved in this folder property across the vault. They become eligible vocabulary, not automatic output: Vault Awareness writes an existing value only when the current file provides supporting evidence through the enabled filename, folder, geolocation, or AI inputs.")
+                    .addToggle(toggle => {
+                        toggle
+                            .setValue(this.plugin.isVaultVocabularyPropertyEnabled(mapping.property))
+                            .onChange(async value => {
+                                this.plugin.setVaultVocabularyPropertyEnabled(mapping.property, value);
+                                await this.plugin.saveSettings();
+                                this.plugin.scheduleVaultVocabularyCacheBuild();
+                                this.syncRenderedVaultVocabularyControls();
+                                this.refreshVaultVocabularyCandidateSummary?.();
+                            });
+                        this.vaultVocabularyToggleControls.push({
+                            getProperty: () => mapping.property,
+                            setValue: nextValue => toggle.setValue(nextValue),
+                            value: this.plugin.isVaultVocabularyPropertyEnabled(mapping.property),
+                            warningHostEl: mappingVaultWarningHostEl ?? undefined,
+                            renderWarning: renderMappingVaultWarning,
+                            getWarningSignature: getMappingVaultWarningSignature,
+                            warningSignature: getMappingVaultWarningSignature(),
+                        });
+                    }),
                 "Use property as Vault Awareness vocabulary",
                 this.getSettingsSectionIcon("vault-awareness")
             );
@@ -12948,6 +14121,7 @@ class AutotagSettingTab extends PluginSettingTab {
         containerEl.style.overflow = "hidden";
         containerEl.style.height = `${previousHeight}px`;
         oldChildren.forEach(child => {
+            child.getAnimations().forEach(animation => animation.cancel());
             child.animate(
                 [
                     { opacity: 1, transform: "translateY(0)" },
@@ -12959,6 +14133,11 @@ class AutotagSettingTab extends PluginSettingTab {
 
         this.tweenSettingsHeight(containerEl, previousHeight, 0, duration, () => {
             if ((containerEl as any).__autotagContentAnimationToken !== token) return;
+            oldChildren.forEach(child => {
+                child.getAnimations().forEach(animation => animation.cancel());
+                child.style.opacity = "";
+                child.style.transform = "";
+            });
             render();
             this.finishSettingsLiveRender(containerEl);
             containerEl.style.height = "";
@@ -12979,6 +14158,7 @@ class AutotagSettingTab extends PluginSettingTab {
         this.finishSettingsLiveRender(containerEl);
         const newChildren = Array.from(containerEl.children) as HTMLElement[];
         newChildren.forEach(child => {
+            child.getAnimations().forEach(animation => animation.cancel());
             child.style.opacity = "0";
             child.style.transform = "translateY(6px)";
         });
@@ -13008,7 +14188,7 @@ class AutotagSettingTab extends PluginSettingTab {
 
         window.requestAnimationFrame(() => {
             newChildren.forEach(child => {
-                child.animate(
+                const animation = child.animate(
                     [
                         { opacity: 0, transform: "translateY(6px)" },
                         { opacity: 1, transform: "translateY(0)" },
@@ -13016,10 +14196,30 @@ class AutotagSettingTab extends PluginSettingTab {
                     { duration: 260, easing, fill: "forwards" }
                 );
                 window.setTimeout(() => {
+                    animation.cancel();
                     child.style.opacity = "";
                     child.style.transform = "";
                 }, 280);
             });
+        });
+    }
+
+    animateExistingSettingsVisibility(containerEl: HTMLElement, visible: boolean): void {
+        if (visible) {
+            containerEl.style.display = "";
+            Array.from(containerEl.children).forEach(child => {
+                if (!(child instanceof HTMLElement)) return;
+                child.getAnimations().forEach(animation => animation.cancel());
+                child.style.opacity = "";
+                child.style.transform = "";
+            });
+            containerEl.style.height = "0px";
+            containerEl.style.overflow = "hidden";
+            this.animateSettingsContent(containerEl, () => undefined);
+            return;
+        }
+        this.animateSettingsCollapseThenRender(containerEl, () => {
+            containerEl.style.display = "none";
         });
     }
 
@@ -13088,6 +14288,23 @@ class AutotagSettingTab extends PluginSettingTab {
                     this.animateSettingsContent(localNominatimHostEl, renderLocalNominatimSettings);
                 }));
 
+        new Setting(geolocationSetupEl)
+            .setName("Geolocation result language")
+            .setDesc("Preferred language for reverse-geocoded place names. Select a full language suggestion such as English (en) or German (de), or enter a clean language/locale code such as de, de-DE, or en-US. Default is English. Changing it creates a separate cache entry for that language.")
+            .addText(text => {
+                this.attachTextSuggestions(
+                    text.inputEl,
+                    GEOLOCATION_LANGUAGE_OPTIONS.map(option => `${option.name} (${option.code})`)
+                );
+                text
+                    .setPlaceholder(DEFAULT_SETTINGS.geolocationResultLanguage)
+                    .setValue(this.plugin.settings.geolocationResultLanguage)
+                    .onChange(async value => {
+                        this.plugin.settings.geolocationResultLanguage = value.trim() || DEFAULT_SETTINGS.geolocationResultLanguage;
+                        await this.plugin.saveSettings();
+                    });
+            });
+
         const localNominatimHostEl = geolocationSetupEl.createDiv();
         const renderLocalNominatimSettings = () => {
             localNominatimHostEl.empty();
@@ -13143,6 +14360,16 @@ class AutotagSettingTab extends PluginSettingTab {
                     text: `Geolocation Property ${index + 1}`,
                     attr: { "data-autotag-geolocation-property-title": "true" },
                 });
+                const vaultOverlapHostEl = propertyPanelEl.createDiv();
+                const renderVaultOverlapNotice = () => {
+                    vaultOverlapHostEl.empty();
+                    this.renderVaultVocabularyOverlapNotice(
+                        vaultOverlapHostEl,
+                        mapping.property,
+                        `geolocation:${mapping.id}`
+                    );
+                };
+                renderVaultOverlapNotice();
                 const setting = new Setting(propertyPanelEl)
                     .setName("Location field")
                     .setDesc("Select the geolocation value and the frontmatter property it should write to.");
@@ -13162,7 +14389,11 @@ class AutotagSettingTab extends PluginSettingTab {
                     .setValue(mapping.property)
                     .onChange(async value => {
                         mapping.property = this.plugin.normalizePropertyName(value, this.plugin.getDefaultGeolocationPropertyName(mapping.field));
+                        this.plugin.synchronizeOverlappingVaultVocabularySources();
                         await this.plugin.saveSettings();
+                        if (mapping.useAsVaultCandidate) this.plugin.scheduleVaultVocabularyCacheBuild();
+                        this.syncRenderedVaultVocabularyControls();
+                        this.refreshRenderedVaultVocabularyOverlapNotices();
                     });
                 });
                 setting.addButton(button => button
@@ -13195,6 +14426,11 @@ class AutotagSettingTab extends PluginSettingTab {
                         this.renderFormatPreview(formatPreviewEl, "Preview", mapping.format, "info");
                         await this.plugin.saveSettings();
                     }));
+                this.renderVaultVocabularyPropertyToggle(
+                    propertyPanelEl,
+                    () => mapping.property,
+                    "Adds existing values from this geolocation property to the Vault Awareness vocabulary. Matching property names in Geolocation, Folder Tags, and other settings share this switch."
+                );
                 this.enhanceInfoDescriptionAnimations(propertyPanelEl);
                 return propertyPanelEl;
             };
@@ -13217,6 +14453,7 @@ class AutotagSettingTab extends PluginSettingTab {
                             field: "country",
                             property: "country",
                             format: "",
+                            useAsVaultCandidate: false,
                         });
                         const addedMapping = this.plugin.settings.geolocationProperties[this.plugin.settings.geolocationProperties.length - 1];
                         this.animateElementHeightChange(propertiesHostEl, () => {
@@ -13288,6 +14525,8 @@ class AutotagSettingTab extends PluginSettingTab {
     private settingsRefreshTimer: number | null = null;
     private processingStatusTimer: number | null = null;
     private healthDashboardTimer: number | null = null;
+    private vaultVocabularyToggleControls: VaultVocabularyToggleControl[] = [];
+    private refreshVaultVocabularyCandidateSummary: (() => void) | null = null;
     private activeSettingsSection = "health";
     private settingsSearchQuery = "";
     private healthCheckResults = new Map<string, HealthCheckResult>();
@@ -13362,7 +14601,7 @@ class AutotagSettingTab extends PluginSettingTab {
             { id: "processing", label: "Processing & Queue", icon: "list-checks", keywords: ["queue", "workers", "wait", "bulk"] },
             { id: "duplicates", label: "Duplicates", icon: "copy-check", keywords: ["duplicate", "hash", "pair", "manual pairing", "replace"] },
             { id: "fix-recover", label: "Fix / Recover", icon: "wrench", keywords: ["failed", "retry", "recover", "help", "processed", "forget", "reprocess"] },
-            { id: "qol", label: "QoL", icon: "sliders-horizontal", keywords: ["shutdown", "delete pair", "quality of life"] },
+            { id: "qol", label: "QoL", icon: "sliders-horizontal", keywords: ["delete pair", "file warnings", "quality of life"] },
             { id: "thanks", label: "Thanks", icon: "heart", keywords: ["thanks", "credit", "inspired", "dependencies", "templater"] },
         ];
     }
@@ -13745,17 +14984,242 @@ class AutotagSettingTab extends PluginSettingTab {
         });
     }
 
-    getVaultVocabularyAdvancedWarningLines(enabled: boolean, vaultAwarenessEnabled: boolean, source: "ai-tags" | "property" | "fallback"): string[] {
+    getVaultVocabularyOverlapState(propertyName: string, currentSourceKey: string): {
+        property: string;
+        linkedSources: VaultVocabularySourceBinding[];
+        locations: Map<string, { label: string; sectionId: string; anchorId: string }>;
+        signature: string;
+    } {
+        const property = this.plugin.normalizePropertyName(propertyName, "");
+        const locations = new Map<string, { label: string; sectionId: string; anchorId: string }>();
+        if (!property) return { property, linkedSources: [], locations, signature: "" };
+        const allBindings = this.plugin.getVaultVocabularySourceBindings();
+        const currentBinding = allBindings.find(source => source.key === currentSourceKey);
+        const linkedSources = allBindings
+            .filter(source => source.key !== currentSourceKey && source.property.toLowerCase() === property.toLowerCase());
+        linkedSources.forEach(source => locations.set(`${source.sectionId}:${source.anchorId}`, source));
+        this.getPropertyConfigurationLocations(property).forEach(location => {
+            if (currentBinding?.anchorId === location.anchorId && currentBinding.sectionId === location.sectionId) return;
+            locations.set(`${location.sectionId}:${location.anchorId}`, location);
+        });
+        const signature = JSON.stringify([
+            property.toLowerCase(),
+            linkedSources.length > 0,
+            Array.from(locations.entries())
+                .map(([key, location]) => `${key}:${location.label}`)
+                .sort(),
+        ]);
+        return { property, linkedSources, locations, signature };
+    }
+
+    renderVaultVocabularyOverlapNotice(containerEl: HTMLElement, propertyName: string, currentSourceKey: string): void {
+        containerEl.addClass("autotag-inline-dependency-warning-host");
+        containerEl.dataset.autotagVaultVocabularySourceKey = currentSourceKey;
+        const { property, linkedSources, locations, signature } = this.getVaultVocabularyOverlapState(propertyName, currentSourceKey);
+        containerEl.dataset.autotagVaultVocabularySignature = signature;
+        if (!property) return;
+        if (locations.size === 0) return;
+
+        const panel = containerEl.createDiv({
+            cls: "autotag-attention-warning-panel autotag-inline-dependency-warning autotag-vault-source-overlap-notice",
+        });
+        panel.addClass("autotag-inline-dependency-warning-entering");
+        const titleEl = panel.createEl("strong");
+        const iconEl = titleEl.createSpan({ cls: "autotag-inline-dependency-warning-icon" });
+        setIcon(iconEl, "link-2");
+        titleEl.createSpan({ text: linkedSources.length > 0 ? "Shared Vault Awareness vocabulary property" : "Property configured elsewhere" });
+        panel.createEl("p", {
+            text: linkedSources.length > 0
+                ? `'${property}' is configured in more than one Vault Awareness source. Its vocabulary toggles stay synchronized while the property names match. Renaming one separates it from this group.`
+                : `'${property}' is also configured elsewhere. This source scans values from that same frontmatter property; renaming either occurrence separates them.`,
+            cls: "setting-item-description autotag-vault-source-overlap-description",
+        });
+        const listEl = panel.createEl("ul");
+        locations.forEach(source => {
+            const itemEl = listEl.createEl("li");
+            const buttonEl = itemEl.createEl("button", {
+                text: source.label,
+                cls: "autotag-property-location-link",
+            });
+            buttonEl.type = "button";
+            buttonEl.setAttr("aria-label", `Open ${source.label}`);
+            buttonEl.addEventListener("click", () => {
+                this.openSettingsProblemTarget(source.sectionId, source.anchorId);
+            });
+        });
+        window.requestAnimationFrame(() => {
+            window.requestAnimationFrame(() => {
+                if (!panel.isConnected) return;
+                panel.removeClass("autotag-inline-dependency-warning-entering");
+            });
+        });
+    }
+
+    refreshRenderedVaultVocabularyOverlapNotices(): void {
+        const bindings = new Map(
+            this.plugin.getVaultVocabularySourceBindings().map(binding => [binding.key, binding])
+        );
+        const hosts = Array.from(
+            this.containerEl.querySelectorAll("[data-autotag-vault-vocabulary-source-key]")
+        ) as HTMLElement[];
+        hosts.forEach(hostEl => {
+            const sourceKey = hostEl.dataset.autotagVaultVocabularySourceKey ?? "";
+            const binding = bindings.get(sourceKey);
+            const nextState = this.getVaultVocabularyOverlapState(binding?.property ?? "", sourceKey);
+            if ((hostEl.dataset.autotagVaultVocabularySignature ?? "") === nextState.signature) return;
+            const render = () => {
+                hostEl.empty();
+                if (binding) {
+                    this.renderVaultVocabularyOverlapNotice(hostEl, binding.property, sourceKey);
+                }
+            };
+            if (hostEl.getClientRects().length > 0) {
+                this.animateInlineDependencyWarning(hostEl, render);
+            } else {
+                render();
+            }
+        });
+    }
+
+    renderVaultVocabularyPropertyToggle(
+        containerEl: HTMLElement,
+        propertyName: string | (() => string),
+        description = "Indexes values already saved in this property across the vault. They become eligible candidates rather than automatic output; Vault Awareness writes a value only when the current file supplies supporting evidence. Matching property names share one synchronized setting.",
+        onChanged?: () => void
+    ): void {
+        const getProperty = () => this.plugin.normalizePropertyName(
+            typeof propertyName === "function" ? propertyName() : propertyName,
+            ""
+        );
+        const property = getProperty();
+        if (!property) return;
+        const warningHostEl = containerEl.createDiv();
+        const getWarningState = () => {
+            const currentProperty = getProperty();
+            const title = this.hasGeneratedVocabularyOutputOverlap(currentProperty)
+                ? "Potential feedback loop"
+                : "Vault Awareness is off";
+            const lines = this.getVaultVocabularyAdvancedWarningLines(
+                this.plugin.isVaultVocabularyPropertyEnabled(currentProperty),
+                this.plugin.settings.vaultAwarenessEnabled,
+                "property",
+                currentProperty
+            );
+            return { title, lines };
+        };
+        const getWarningSignature = () => {
+            const state = getWarningState();
+            return JSON.stringify([state.title, state.lines]);
+        };
+        const renderWarning = () => {
+            warningHostEl.empty();
+            const state = getWarningState();
+            this.renderInlineDependencyWarning(
+                warningHostEl,
+                state.title,
+                state.lines,
+                this.getSettingsSectionIcon("vault-awareness")
+            );
+        };
+        renderWarning();
+        const initialValue = this.plugin.isVaultVocabularyPropertyEnabled(property);
+        const toggleSetting = new Setting(containerEl)
+                .setDesc(description)
+                .addToggle(toggle => {
+                    toggle
+                    .setValue(initialValue)
+                    .onChange(async value => {
+                        const currentProperty = getProperty();
+                        this.plugin.setVaultVocabularyPropertyEnabled(currentProperty, value);
+                        await this.plugin.saveSettings();
+                        this.plugin.scheduleVaultVocabularyCacheBuild();
+                        this.syncRenderedVaultVocabularyControls();
+                        this.refreshVaultVocabularyCandidateSummary?.();
+                        onChanged?.();
+                    });
+                    this.vaultVocabularyToggleControls.push({
+                        getProperty,
+                        setValue: nextValue => toggle.setValue(nextValue),
+                        value: initialValue,
+                        warningHostEl,
+                        renderWarning,
+                        getWarningSignature,
+                        warningSignature: getWarningSignature(),
+                    });
+                });
+        this.setSettingNameWithIcon(
+            toggleSetting,
+            "Use property as Vault Awareness vocabulary",
+            this.getSettingsSectionIcon("vault-awareness")
+        );
+    }
+
+    syncRenderedVaultVocabularyControls(): void {
+        this.vaultVocabularyToggleControls.forEach(control => {
+            const property = this.plugin.normalizePropertyName(control.getProperty(), "");
+            if (!property) return;
+            const enabled = this.plugin.isVaultVocabularyPropertyEnabled(property);
+            if (control.value !== enabled) {
+                control.setValue(enabled);
+                control.value = enabled;
+            }
+            const warningSignature = control.getWarningSignature?.();
+            if (
+                control.warningHostEl
+                && control.renderWarning
+                && warningSignature !== undefined
+                && warningSignature !== control.warningSignature
+            ) {
+                control.warningSignature = warningSignature;
+                this.animateInlineDependencyWarning(control.warningHostEl, control.renderWarning);
+            }
+        });
+    }
+
+    hasGeneratedVocabularyOutputOverlap(propertyName: string): boolean {
+        const propertyKey = propertyName.trim().toLowerCase();
+        if (!propertyKey) return false;
+        const aiTagsOverlap = this.plugin.settings.aiTagsPropertyEnabled
+            && propertyKey === this.plugin.getAiTagsPropertyName().toLowerCase();
+        const vaultAwarenessOverlap = this.plugin.settings.vaultAwarenessOutputEnabled
+            && propertyKey === this.plugin.getVaultAwarenessOutputPropertyName().toLowerCase();
+        return aiTagsOverlap || vaultAwarenessOverlap;
+    }
+
+    getVaultVocabularyAdvancedWarningLines(
+        enabled: boolean,
+        vaultAwarenessEnabled: boolean,
+        source: "ai-tags" | "property" | "fallback",
+        propertyName = ""
+    ): string[] {
         if (!enabled) return [];
-        const lines = source === "ai-tags"
-            ? [
-                "Only enable this if you know what you are doing. AI-generated tags can feed back into Vault Awareness and then influence future AI tags, canonicalization, and routed output.",
-                "This may drastically alter tagging behavior, reinforce incorrect or overly broad tags, and lead to an escalating feedback loop.",
-            ]
-            : [
-                "Only enable this if you know what you are doing. Values from this property become Vault Awareness vocabulary and can strongly influence future AI tagging, canonicalization, and routed output.",
-                "If noisy or broad values are scanned back into the vocabulary, this may lead to an escalating feedback loop.",
-            ];
+        const lines: string[] = [];
+        if (source === "ai-tags") {
+            lines.push(
+                "AI Tags are based on the image description and enabled metadata, but the model may occasionally infer, generalize, or produce an inaccurate term.",
+                "Enabling this makes accepted AI Tags eligible Vault Awareness vocabulary for later files. Later matches still require current evidence; review the results if tagging gradually becomes broader or less specific."
+            );
+        } else {
+            const propertyKey = propertyName.trim().toLowerCase();
+            const sourceLabel = source === "fallback" ? "folder fallback property" : "property";
+            const aiTagsProperty = this.plugin.getAiTagsPropertyName();
+            const vaultAwarenessProperty = this.plugin.getVaultAwarenessOutputPropertyName();
+            const aiTagsOverlap = this.plugin.settings.aiTagsPropertyEnabled
+                && !!propertyKey
+                && propertyKey === aiTagsProperty.toLowerCase();
+            const vaultAwarenessOverlap = this.plugin.settings.vaultAwarenessOutputEnabled
+                && !!propertyKey
+                && propertyKey === vaultAwarenessProperty.toLowerCase();
+            if (aiTagsOverlap) {
+                lines.push(`This ${sourceLabel} is also the AI Tags output property '${aiTagsProperty}'. Saved generated tags become reusable vocabulary candidates; they are not copied automatically, but a later file can reuse one when its current evidence supports the match.`);
+            }
+            if (vaultAwarenessOverlap) {
+                lines.push(`This ${sourceLabel} is also the Vault Awareness output property '${vaultAwarenessProperty}'. Previously recognized values can re-enter the candidate vocabulary, but each later use still requires supporting evidence from that file.`);
+            }
+            if (aiTagsOverlap || vaultAwarenessOverlap) {
+                lines.push("The evidence requirement limits blind repetition, but an inaccurate or overly broad saved value can still become easier to reinforce over time. Review this shared output property occasionally.");
+            }
+        }
         if (!vaultAwarenessEnabled) {
             lines.push(source === "fallback"
                 ? "Vault Awareness is currently disabled; this fallback vocabulary source will apply once Vault Awareness is enabled."
@@ -13884,15 +15348,8 @@ class AutotagSettingTab extends PluginSettingTab {
 
     getBridgeDependencyWarningLines(): string[] {
         if (!this.plugin.settings.bridgeEnabled
-            && !this.plugin.settings.manualEnrichmentEnabled
-            && !this.plugin.settings.selfLearningBridgeEnabled) return [];
+            && !this.plugin.settings.manualEnrichmentEnabled) return [];
         const lines: string[] = [];
-        if (this.plugin.settings.selfLearningBridgeEnabled && !this.plugin.settings.vaultAwarenessEnabled) {
-            lines.push("Self-learning Bridge is enabled, but Vault Awareness is off. Enable Vault Awareness so relationships have existing vocabulary to target.");
-        }
-        if (this.plugin.settings.selfLearningBridgeEnabled && !this.plugin.settings.aiTaggingEnabled) {
-            lines.push("Self-learning Bridge is enabled, but AI Tagging is off. Enable AI Tagging so the relationship pass can run.");
-        }
         if (this.plugin.settings.bridgeEnabled
             && !this.plugin.settings.bridgeUseAiInput
             && !this.plugin.settings.bridgeUseFilenameInput
@@ -14009,8 +15466,8 @@ class AutotagSettingTab extends PluginSettingTab {
         const enrichmentRuleCount = this.plugin.parseManualEnrichmentRules().size;
         const bridgeEvidenceActive = this.plugin.settings.bridgeEnabled;
         const bridgeDirectActive = this.plugin.settings.manualEnrichmentEnabled;
-        const selfLearningBridgeActive = this.plugin.settings.selfLearningBridgeEnabled;
-        const bridgeAnyActive = bridgeEvidenceActive || bridgeDirectActive || selfLearningBridgeActive;
+        const adaptiveVaultMatchingActive = this.plugin.settings.selfLearningBridgeEnabled;
+        const bridgeAnyActive = bridgeEvidenceActive || bridgeDirectActive;
         const bridgeHasActiveRules = (bridgeEvidenceActive && bridgeRuleCount > 0)
             || (bridgeDirectActive && enrichmentRuleCount > 0);
         const visibleProcessingQueueCount = this.plugin.getUniqueProcessingPaths().length;
@@ -14024,6 +15481,7 @@ class AutotagSettingTab extends PluginSettingTab {
         const duplicateAttentionCount = duplicateUnlinkedHashCount + duplicateUnhashedFileCount + duplicateUnpairedFileCount;
         const duplicateProtectionActive = this.plugin.settings.duplicateDetectionMode !== "off";
         const recoverUnprocessedBaseFileCount = expensiveCounts.recoverUnprocessedBaseFileCount;
+        const recoverMissingCompanionCount = expensiveCounts.recoverMissingCompanionCount;
         const recoverFailedCount = this.plugin.getFailedFileRecordsNeedingAttention().length;
         const recoverProcessedCount = this.plugin.settings.processedFiles.length;
         const setupProblemLines = this.getSetupProblemWarningLines();
@@ -14035,9 +15493,11 @@ class AutotagSettingTab extends PluginSettingTab {
         const duplicateSolutionAnchorId = duplicateHashAttentionCount > 0
             ? "autotag-duplicate-hashes-warning"
             : duplicateUnpairedFileCount > 0 ? "autotag-duplicate-fix-warning" : undefined;
-        const recoverSolutionAnchorId = recoverFailedCount > 0
-            ? "autotag-failed-files-warning"
-            : recoverUnprocessedBaseFileCount > 0 ? "autotag-unprocessed-files-warning" : undefined;
+        const recoverSolutionAnchorId = recoverMissingCompanionCount > 0
+            ? "autotag-reprocess-source-file"
+            : recoverFailedCount > 0
+                ? "autotag-failed-files-warning"
+                : recoverUnprocessedBaseFileCount > 0 ? "autotag-unprocessed-files-warning" : undefined;
         const setupCheck = this.getHealthCheckFallback("setup-paths", "Setup - Companion Paths");
         const imageAnalysisCheck = this.getHealthCheckFallback("image-analysis", "AI - Image Analysis");
         const ollamaCheck = this.getHealthCheckFallback("ai-ollama", "AI Tags - Tag Model");
@@ -14147,6 +15607,7 @@ class AutotagSettingTab extends PluginSettingTab {
                 checks: [
                     { tone: this.plugin.settings.vaultAwarenessEnabled ? "success" : "neutral", text: this.plugin.settings.vaultAwarenessEnabled ? "Vault Awareness enabled" : "Vault Awareness disabled" },
                     ...(vaultAwarenessProblemLines.length > 0 ? [{ tone: "warning" as const, text: "AI Tagging is required" }] : []),
+                    { tone: adaptiveVaultMatchingActive ? "success" : "neutral", text: adaptiveVaultMatchingActive ? "Adaptive Vault Matching enabled" : "Adaptive Vault Matching disabled" },
                     { tone: vaultCandidateProperties.length > 0 ? "success" : "neutral", text: `${vaultCandidateProperties.length} candidate propert${vaultCandidateProperties.length === 1 ? "y" : "ies"}` },
                     { tone: vocabularyCount > 0 ? "success" : "neutral", text: `${vocabularyCount} known term${vocabularyCount === 1 ? "" : "s"}` },
                 ],
@@ -14160,17 +15621,16 @@ class AutotagSettingTab extends PluginSettingTab {
                 icon: this.getSettingsSectionIcon("bridge"),
                 targetSectionId: "bridge",
                 solutionAnchorId: bridgeProblemLines.length > 0 ? "autotag-bridge-dependency-warning" : undefined,
-                value: bridgeProblemLines.length > 0 ? "Needs input" : bridgeHasActiveRules || selfLearningBridgeActive ? "On" : bridgeAnyActive ? "Ready" : "Off",
+                value: bridgeProblemLines.length > 0 ? "Needs input" : bridgeHasActiveRules ? "On" : bridgeAnyActive ? "Ready" : "Off",
                 description: "",
                 checks: [
                     ...(bridgeProblemLines.length > 0 ? [{ tone: "warning" as const, text: "Input dependency needs attention" }] : []),
                     { tone: bridgeEvidenceActive ? "success" : "neutral", text: bridgeEvidenceActive ? "Evidence-aware rules enabled" : "Evidence-aware rules disabled" },
                     { tone: bridgeDirectActive ? "success" : "neutral", text: bridgeDirectActive ? "Direct expansion rules enabled" : "Direct expansion rules disabled" },
-                    { tone: selfLearningBridgeActive ? "success" : "neutral", text: selfLearningBridgeActive ? "Self-learning Bridge enabled" : "Self-learning Bridge disabled" },
                     { tone: bridgeRuleCount > 0 ? "success" : "neutral", text: `${bridgeRuleCount} evidence-aware rule${bridgeRuleCount === 1 ? "" : "s"}` },
                     { tone: enrichmentRuleCount > 0 ? "success" : "neutral", text: `${enrichmentRuleCount} direct expansion rule${enrichmentRuleCount === 1 ? "" : "s"}` },
                 ],
-                tone: bridgeProblemLines.length > 0 ? "warning" : bridgeHasActiveRules || selfLearningBridgeActive ? "success" : "neutral",
+                tone: bridgeProblemLines.length > 0 ? "warning" : bridgeHasActiveRules ? "success" : "neutral",
             },
             {
                 id: "processing",
@@ -14208,14 +15668,17 @@ class AutotagSettingTab extends PluginSettingTab {
                 icon: this.getSettingsSectionIcon("fix-recover"),
                 targetSectionId: "fix-recover",
                 solutionAnchorId: recoverSolutionAnchorId,
-                value: recoverFailedCount > 0 ? `${recoverFailedCount} failed` : "No failures",
+                value: recoverMissingCompanionCount > 0
+                    ? `${recoverMissingCompanionCount} missing note${recoverMissingCompanionCount === 1 ? "" : "s"}`
+                    : recoverFailedCount > 0 ? `${recoverFailedCount} failed` : "No failures",
                 description: "",
                 checks: [
+                    { tone: recoverMissingCompanionCount > 0 ? "danger" : "success", text: recoverMissingCompanionCount > 0 ? `${recoverMissingCompanionCount} source file${recoverMissingCompanionCount === 1 ? "" : "s"} missing a companion note` : "No missing companion notes" },
                     { tone: recoverFailedCount > 0 ? "danger" : "success", text: recoverFailedCount > 0 ? `${recoverFailedCount} failed file${recoverFailedCount === 1 ? "" : "s"}` : "No failed files" },
                     { tone: recoverUnprocessedBaseFileCount > 0 ? "danger" : "success", text: `${recoverUnprocessedBaseFileCount} unprocessed watched file${recoverUnprocessedBaseFileCount === 1 ? "" : "s"}` },
                     { tone: "neutral", text: `${recoverProcessedCount} processed file${recoverProcessedCount === 1 ? "" : "s"} tracked` },
                 ],
-                tone: recoverFailedCount > 0 || recoverUnprocessedBaseFileCount > 0 ? "danger" : "success",
+                tone: recoverMissingCompanionCount > 0 || recoverFailedCount > 0 || recoverUnprocessedBaseFileCount > 0 ? "danger" : "success",
             },
         ];
     }
@@ -14663,19 +16126,6 @@ class AutotagSettingTab extends PluginSettingTab {
         }
     }
 
-    moveSettingWithFollowingDescriptions(sourceWrapper: HTMLElement | undefined, targetWrapper: HTMLElement | undefined, name: string): void {
-        if (!sourceWrapper || !targetWrapper) return;
-        const settingEl = this.findSettingItemByName(sourceWrapper, name);
-        if (!settingEl) return;
-        let node: ChildNode | null = settingEl;
-        while (node) {
-            const next: ChildNode | null = node.nextSibling;
-            targetWrapper.appendChild(node);
-            if (!(next instanceof HTMLElement) || next.matches(".setting-item, h3, h4")) break;
-            node = next;
-        }
-    }
-
     appendSectionSubheading(targetWrapper: HTMLElement | undefined, title: string): void {
         if (!targetWrapper) return;
         const heading = document.createElement("h4");
@@ -14888,7 +16338,21 @@ class AutotagSettingTab extends PluginSettingTab {
 
         this.moveHeadingGroup(wrappers.get("folder-tags"), wrappers.get("properties"), "Frontmatter");
         this.moveHeadingGroup(wrappers.get("qol"), wrappers.get("duplicates"), "Fix");
-        this.moveSettingWithFollowingDescriptions(wrappers.get("qol"), wrappers.get("processing"), "Shutdown Protection");
+        const adaptiveVaultSection = wrappers.get("bridge")?.querySelector("#autotag-adaptive-vault-matching-section") as HTMLElement | null;
+        const adaptiveVaultSlot = wrappers.get("vault-awareness")?.querySelector("#autotag-adaptive-vault-matching-slot") as HTMLElement | null;
+        if (adaptiveVaultSection && adaptiveVaultSlot) {
+            const vaultOutputHeading = Array.from(wrappers.get("vault-awareness")?.querySelectorAll("h4") ?? [])
+                .find(heading => heading.textContent?.trim() === "Vault Awareness Output") as HTMLElement | undefined;
+            const vaultOutputPanel = vaultOutputHeading?.closest(".autotag-subcategory-panel") as HTMLElement | null;
+            if (vaultOutputPanel?.parentElement) {
+                vaultOutputPanel.parentElement.insertBefore(adaptiveVaultSection, vaultOutputPanel);
+                adaptiveVaultSlot.remove();
+            } else {
+                adaptiveVaultSlot.replaceWith(adaptiveVaultSection);
+            }
+        } else {
+            adaptiveVaultSection?.remove();
+        }
         wrappers.set("search", this.createSettingsSearchSection(wrappers));
         wrappers.forEach(wrapper => this.wrapSubcategoryPanels(wrapper));
         wrappers.forEach(wrapper => this.decorateSettingsHeadings(wrapper));
@@ -14951,8 +16415,18 @@ class AutotagSettingTab extends PluginSettingTab {
         return setting;
     }
 
-    renderAiDescriptionPropertySettings(containerEl: HTMLElement): void {
+    renderAiDescriptionPropertySettings(containerEl: HTMLElement, refreshAiInputSummary?: () => void): void {
         containerEl.createEl("h4", { text: "Image Description" });
+        const vaultOverlapHostEl = containerEl.createDiv();
+        const renderVaultOverlapNotice = () => {
+            vaultOverlapHostEl.empty();
+            this.renderVaultVocabularyOverlapNotice(
+                vaultOverlapHostEl,
+                this.plugin.getAiDescriptionPropertyName(),
+                "ai-description"
+            );
+        };
+        renderVaultOverlapNotice();
         const aiDescriptionPropertySetting = new Setting(containerEl)
             .setName("Image description property name")
             .setDesc("Property used for the AI-generated image description. Notice: Empty Fallback to Default.")
@@ -14962,14 +16436,31 @@ class AutotagSettingTab extends PluginSettingTab {
                     .setValue(this.plugin.settings.aiDescriptionPropertyName)
                     .onChange(async value => {
                         this.plugin.settings.aiDescriptionPropertyName = this.plugin.normalizePropertyName(value, DEFAULT_SETTINGS.aiDescriptionPropertyName);
+                        this.plugin.synchronizeOverlappingVaultVocabularySources();
                         await this.plugin.saveSettings();
+                        if (this.plugin.settings.aiDescriptionUseAsVaultCandidate) this.plugin.scheduleVaultVocabularyCacheBuild();
+                        this.syncRenderedVaultVocabularyControls();
+                        this.refreshRenderedVaultVocabularyOverlapNotices();
                     });
             });
         aiDescriptionPropertySetting.settingEl.id = "autotag-ai-description-property";
+        this.renderVaultVocabularyPropertyToggle(
+            containerEl,
+            () => this.plugin.getAiDescriptionPropertyName(),
+            "Adds saved image-description values to the Vault Awareness vocabulary. This can produce broad sentence-sized vocabulary, so enable it only when the property intentionally contains reusable concepts.",
+            refreshAiInputSummary
+        );
     }
 
     renderAiGeneratedPropertySettings(containerEl: HTMLElement, refreshAiInputSummary?: () => void): void {
         containerEl.createEl("h4", { text: "AI Tags" });
+
+        const aiTagsVaultOverlapHostEl = containerEl.createDiv();
+        const renderAiTagsVaultOverlapNotice = () => {
+            aiTagsVaultOverlapHostEl.empty();
+            this.renderVaultVocabularyOverlapNotice(aiTagsVaultOverlapHostEl, this.plugin.getAiTagsPropertyName(), "ai-tags");
+        };
+        renderAiTagsVaultOverlapNotice();
 
         const aiTagsPropertySetting = new Setting(containerEl)
             .setName("Tags generated by AI")
@@ -14988,9 +16479,12 @@ class AutotagSettingTab extends PluginSettingTab {
                     .setValue(this.plugin.settings.aiTagsPropertyName)
                     .onChange(async value => {
                         this.plugin.settings.aiTagsPropertyName = this.plugin.normalizePropertyName(value, DEFAULT_SETTINGS.aiTagsPropertyName);
+                        this.plugin.synchronizeOverlappingVaultVocabularySources();
                         await this.plugin.saveSettings();
                         if (this.plugin.settings.aiTagsUseAsVaultCandidate) this.plugin.scheduleVaultVocabularyCacheBuild();
                         refreshAiInputSummary?.();
+                        this.syncRenderedVaultVocabularyControls();
+                        this.refreshRenderedVaultVocabularyOverlapNotices();
                     });
             });
         aiTagsPropertySetting.settingEl.id = "autotag-ai-tags-property";
@@ -15071,35 +16565,56 @@ class AutotagSettingTab extends PluginSettingTab {
         renderRemoveGeoWarning();
 
         let aiTagsVaultWarningHostEl: HTMLElement | null = null;
+        const getAiTagsVaultWarningState = () => ({
+            title: "AI-generated vocabulary",
+            lines: this.getVaultVocabularyAdvancedWarningLines(
+                this.plugin.isVaultVocabularyPropertyEnabled(this.plugin.getAiTagsPropertyName()),
+                this.plugin.settings.vaultAwarenessEnabled,
+                "ai-tags"
+            ),
+        });
+        const getAiTagsVaultWarningSignature = () => {
+            const state = getAiTagsVaultWarningState();
+            return JSON.stringify([state.title, state.lines]);
+        };
         const renderAiTagsVaultWarning = () => {
             if (!aiTagsVaultWarningHostEl) return;
-                aiTagsVaultWarningHostEl.empty();
-                this.renderInlineDependencyWarning(
-                    aiTagsVaultWarningHostEl,
-                    "Advanced AI Tags vocabulary source",
-                    this.getVaultVocabularyAdvancedWarningLines(
-                        this.plugin.settings.aiTagsUseAsVaultCandidate,
-                        this.plugin.settings.vaultAwarenessEnabled,
-                        "ai-tags"
-                    ),
-                    this.getSettingsSectionIcon("vault-awareness")
-                );
-            };
+            aiTagsVaultWarningHostEl.empty();
+            const state = getAiTagsVaultWarningState();
+            this.renderInlineDependencyWarning(
+                aiTagsVaultWarningHostEl,
+                state.title,
+                state.lines,
+                this.getSettingsSectionIcon("vault-awareness")
+            );
+        };
         aiTagsVaultWarningHostEl = containerEl.createDiv();
         renderAiTagsVaultWarning();
         this.setSettingNameWithIcon(
             new Setting(containerEl)
-            .setDesc("Scans the selected AI tags property across the whole vault. Every existing frontmatter value found there can become known vocabulary for Vault Awareness, not only values from the file currently being processed.")
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.aiTagsUseAsVaultCandidate)
-                .onChange(async value => {
-                    this.plugin.settings.aiTagsUseAsVaultCandidate = value;
-                    await this.plugin.saveSettings();
-                    this.plugin.scheduleVaultVocabularyCacheBuild();
-                    refreshAiInputSummary?.();
-                    this.animateInlineDependencyWarning(aiTagsVaultWarningHostEl!, renderAiTagsVaultWarning);
-                })),
-            "Use property as Vault Awareness vocabulary",
+            .setDesc("Current AI Tags already act as evidence during Vault Awareness matching. Enable this only when AI Tags saved in existing notes should also become eligible vocabulary for later files; those values are still applied only when current evidence supports a match.")
+            .addToggle(toggle => {
+                toggle
+                    .setValue(this.plugin.isVaultVocabularyPropertyEnabled(this.plugin.getAiTagsPropertyName()))
+                    .onChange(async value => {
+                        this.plugin.setVaultVocabularyPropertyEnabled(this.plugin.getAiTagsPropertyName(), value);
+                        await this.plugin.saveSettings();
+                        this.plugin.scheduleVaultVocabularyCacheBuild();
+                        this.syncRenderedVaultVocabularyControls();
+                        this.refreshVaultVocabularyCandidateSummary?.();
+                        refreshAiInputSummary?.();
+                    });
+                this.vaultVocabularyToggleControls.push({
+                    getProperty: () => this.plugin.getAiTagsPropertyName(),
+                    setValue: nextValue => toggle.setValue(nextValue),
+                    value: this.plugin.isVaultVocabularyPropertyEnabled(this.plugin.getAiTagsPropertyName()),
+                    warningHostEl: aiTagsVaultWarningHostEl ?? undefined,
+                    renderWarning: renderAiTagsVaultWarning,
+                    getWarningSignature: getAiTagsVaultWarningSignature,
+                    warningSignature: getAiTagsVaultWarningSignature(),
+                });
+            }),
+            "Add saved AI Tags to VA vocabulary",
             this.getSettingsSectionIcon("vault-awareness")
         );
 
@@ -15135,7 +16650,7 @@ class AutotagSettingTab extends PluginSettingTab {
                 });
 
             const fallbackMode = this.plugin.getFolderFallbackAiCandidateMode();
-            if (fallbackMode !== "disabled") {
+            if (this.plugin.settings.folderFallbackEnabled && fallbackMode !== "disabled") {
                 add(`Folder fallback: ${this.plugin.normalizeFolderFallbackProperty(this.plugin.settings.folderFallbackProperty)} (${this.getCandidateModeLabel(fallbackMode)})`);
             }
         }
@@ -15581,7 +17096,7 @@ class AutotagSettingTab extends PluginSettingTab {
                     }
                 }));
         const refreshAiInputSummary = this.renderAiInputSettings(aiBodyEl);
-        this.renderAiDescriptionPropertySettings(aiBodyEl);
+        this.renderAiDescriptionPropertySettings(aiBodyEl, refreshAiInputSummary);
         this.renderAiGeneratedPropertySettings(aiBodyEl, refreshAiInputSummary);
         this.wrapSubcategoryPanels(aiBodyEl);
         this.decorateSettingsHeadings(aiBodyEl);
@@ -15805,6 +17320,8 @@ class AutotagSettingTab extends PluginSettingTab {
         this.resetInfoScrollCloseHandlers();
         this.resetProcessingStatusTimer();
         this.resetHealthDashboardTimer();
+        this.vaultVocabularyToggleControls = [];
+        this.refreshVaultVocabularyCandidateSummary = null;
         containerEl.empty();
         containerEl.addClass("autotag-settings-tab");
 
@@ -16003,6 +17520,38 @@ class AutotagSettingTab extends PluginSettingTab {
             folderTagsBodyEl.createEl("h4", { text: "Fallback" });
             const fallbackPanelEl = folderTagsBodyEl.createDiv({ cls: "autotag-property-panel" });
             fallbackPanelEl.createEl("h5", { text: "Folder Fallback" });
+            let fallbackEnabledWarningHostEl: HTMLElement | null = null;
+            const renderFallbackEnabledWarning = () => {
+                if (!fallbackEnabledWarningHostEl) return;
+                fallbackEnabledWarningHostEl.empty();
+                this.renderInlineDependencyWarning(
+                    fallbackEnabledWarningHostEl,
+                    "Unassigned folder values will be discarded",
+                    !this.plugin.settings.folderFallbackEnabled
+                        ? ["Any folder value that does not match one of the Folder Properties above will be discarded instead of being written to the fallback property."]
+                        : [],
+                    "alert-triangle"
+                );
+            };
+            new Setting(fallbackPanelEl)
+                .setName("Enable Folder Fallback")
+                .setDesc("Writes folder names that are not assigned to a Folder Property into the fallback property. When it receives values, the fallback property can appear in a companion note even when it is not declared in Properties.")
+                .addToggle(toggle => toggle
+                    .setValue(this.plugin.settings.folderFallbackEnabled)
+                    .onChange(async value => {
+                        this.plugin.settings.folderFallbackEnabled = value;
+                        await this.plugin.saveSettings();
+                        this.animateInlineDependencyWarning(fallbackEnabledWarningHostEl!, renderFallbackEnabledWarning);
+                    }));
+            fallbackEnabledWarningHostEl = fallbackPanelEl.createDiv();
+            renderFallbackEnabledWarning();
+
+            const fallbackVaultOverlapHostEl = fallbackPanelEl.createDiv();
+            const renderFallbackVaultOverlapNotice = () => {
+                fallbackVaultOverlapHostEl.empty();
+                this.renderVaultVocabularyOverlapNotice(fallbackVaultOverlapHostEl, this.plugin.settings.folderFallbackProperty, "folder-fallback");
+            };
+            renderFallbackVaultOverlapNotice();
             const fallbackPropertySetting = new Setting(fallbackPanelEl)
                 .setName("Folder Fallback Property")
                 .setDesc("Where folder names go when they are not listed above. Type any property name or choose a searchable suggestion from the active template, detected vault properties, and plugin properties. Notice: Empty Fallback to Default.")
@@ -16012,8 +17561,11 @@ class AutotagSettingTab extends PluginSettingTab {
                         .setValue(this.plugin.settings.folderFallbackProperty)
                         .onChange(async value => {
                             this.plugin.settings.folderFallbackProperty = this.plugin.normalizeFolderFallbackProperty(value);
+                            this.plugin.synchronizeOverlappingVaultVocabularySources();
                             await this.plugin.saveSettings();
                             if (this.plugin.settings.folderFallbackUseAsVaultCandidate) this.plugin.scheduleVaultVocabularyCacheBuild();
+                            this.syncRenderedVaultVocabularyControls();
+                            this.refreshRenderedVaultVocabularyOverlapNotices();
                         });
                 });
             fallbackPropertySetting.settingEl.id = "autotag-folder-fallback-property";
@@ -16068,17 +17620,30 @@ class AutotagSettingTab extends PluginSettingTab {
             renderFallbackAiWarning();
 
             let fallbackVaultWarningHostEl: HTMLElement | null = null;
+            const getFallbackVaultWarningState = () => {
+                const title = this.hasGeneratedVocabularyOutputOverlap(this.plugin.settings.folderFallbackProperty)
+                    ? "Potential feedback loop"
+                    : "Vault Awareness is off";
+                const lines = this.getVaultVocabularyAdvancedWarningLines(
+                    this.plugin.isVaultVocabularyPropertyEnabled(this.plugin.settings.folderFallbackProperty),
+                    this.plugin.settings.vaultAwarenessEnabled,
+                    "fallback",
+                    this.plugin.settings.folderFallbackProperty
+                );
+                return { title, lines };
+            };
+            const getFallbackVaultWarningSignature = () => {
+                const state = getFallbackVaultWarningState();
+                return JSON.stringify([state.title, state.lines]);
+            };
             const renderFallbackVaultWarning = () => {
                 if (!fallbackVaultWarningHostEl) return;
                 fallbackVaultWarningHostEl.empty();
+                const state = getFallbackVaultWarningState();
                 this.renderInlineDependencyWarning(
                     fallbackVaultWarningHostEl,
-                    "Advanced vocabulary source",
-                    this.getVaultVocabularyAdvancedWarningLines(
-                        this.plugin.settings.folderFallbackUseAsVaultCandidate,
-                        this.plugin.settings.vaultAwarenessEnabled,
-                        "fallback"
-                    ),
+                    state.title,
+                    state.lines,
                     this.getSettingsSectionIcon("vault-awareness")
                 );
             };
@@ -16086,15 +17651,27 @@ class AutotagSettingTab extends PluginSettingTab {
             renderFallbackVaultWarning();
             this.setSettingNameWithIcon(
                 new Setting(fallbackPanelEl)
-                    .setDesc("Scans the fallback property across the whole vault. Every existing frontmatter value found there can become known vocabulary for Vault Awareness, not only values from the file currently being processed.")
-                    .addToggle(toggle => toggle
-                        .setValue(this.plugin.settings.folderFallbackUseAsVaultCandidate)
-                        .onChange(async value => {
-                            this.plugin.settings.folderFallbackUseAsVaultCandidate = value;
-                            await this.plugin.saveSettings();
-                            this.plugin.scheduleVaultVocabularyCacheBuild();
-                            this.animateInlineDependencyWarning(fallbackVaultWarningHostEl!, renderFallbackVaultWarning);
-                        })),
+                    .setDesc("Indexes folder names already saved in the fallback property across the vault. They become eligible vocabulary, not automatic output: Vault Awareness reuses one only when the current file supplies supporting evidence through the enabled filename, folder, geolocation, or AI inputs.")
+                    .addToggle(toggle => {
+                        toggle
+                            .setValue(this.plugin.isVaultVocabularyPropertyEnabled(this.plugin.settings.folderFallbackProperty))
+                            .onChange(async value => {
+                                this.plugin.setVaultVocabularyPropertyEnabled(this.plugin.settings.folderFallbackProperty, value);
+                                await this.plugin.saveSettings();
+                                this.plugin.scheduleVaultVocabularyCacheBuild();
+                                this.syncRenderedVaultVocabularyControls();
+                                this.refreshVaultVocabularyCandidateSummary?.();
+                            });
+                        this.vaultVocabularyToggleControls.push({
+                            getProperty: () => this.plugin.settings.folderFallbackProperty,
+                            setValue: nextValue => toggle.setValue(nextValue),
+                            value: this.plugin.isVaultVocabularyPropertyEnabled(this.plugin.settings.folderFallbackProperty),
+                            warningHostEl: fallbackVaultWarningHostEl ?? undefined,
+                            renderWarning: renderFallbackVaultWarning,
+                            getWarningSignature: getFallbackVaultWarningSignature,
+                            warningSignature: getFallbackVaultWarningSignature(),
+                        });
+                    }),
                 "Use property as Vault Awareness vocabulary",
                 this.getSettingsSectionIcon("vault-awareness")
             );
@@ -16203,6 +17780,41 @@ class AutotagSettingTab extends PluginSettingTab {
         this.renderGeolocationSettings(containerEl);
 
         this.createSettingsAnchor(containerEl, 'processing', 'Processing & Queue');
+
+        containerEl.createEl("h4", { text: "Startup Processing" });
+
+        new Setting(containerEl)
+            .setName("Resume interrupted files on startup")
+            .setDesc(this.plugin.settings.shutdownProtectionEnabled
+                ? "Remembers exact queued and in-progress files so those interrupted jobs can resume after an Obsidian restart or plugin reload."
+                : "Warning: When turned off, queued or in-progress processing is not logged and will be lost on shutdown or reload.")
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.shutdownProtectionEnabled)
+                .onChange(async value => {
+                    this.plugin.settings.shutdownProtectionEnabled = value;
+                    if (!value) {
+                        this.plugin.settings.protectedJobs = [];
+                    }
+                    await this.plugin.saveSettings();
+                    this.refreshDisplayAnimated();
+                }));
+
+        containerEl.createEl('p', {
+            text: this.plugin.settings.shutdownProtectionEnabled
+                ? `${this.plugin.settings.protectedJobs.length} unfinished file${this.plugin.settings.protectedJobs.length === 1 ? "" : "s"} currently logged for resume.`
+                : "Enable this if you want Autotag to resume unfinished queued files after an Obsidian reload or shutdown.",
+            cls: 'setting-item-description',
+        });
+
+        new Setting(containerEl)
+            .setName("Process unprocessed files on startup")
+            .setDesc("After Obsidian starts, scans the Base Path and queues files that are not marked as processed. Jobs restored by Shutdown Protection are excluded. Default is off so startup stays quiet unless you enable this broader catch-up scan.")
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.autoProcessUnprocessedOnReload)
+                .onChange(async value => {
+                    this.plugin.settings.autoProcessUnprocessedOnReload = value;
+                    await this.plugin.saveSettings();
+                }));
 
         containerEl.createEl("h4", { text: "Processing Setup" });
 
@@ -16411,7 +18023,7 @@ class AutotagSettingTab extends PluginSettingTab {
             this.renderHowItWorksPanel(
                 vaultHowHostEl,
                 "How Vault Awareness works",
-                "When enabled, Autotag indexes configured frontmatter vocabulary before processing. Exact, alias, learned, structural, and semantic matching are configured under Bridge > Self-learning Bridge; recognized existing values can then be written through the Vault Awareness output."
+                "When enabled, Autotag indexes configured frontmatter vocabulary before processing. Core matching handles exact values and aliases; Adaptive Vault Matching can additionally reuse learned, structural, and semantic relationships before recognized values are written to the configured outputs."
             );
         };
         renderVaultHow();
@@ -16429,21 +18041,21 @@ class AutotagSettingTab extends PluginSettingTab {
         };
         this.setSettingNameWithIcon(
             new Setting(containerEl)
-            .setDesc("Indexes configured vault vocabulary before processing and enhances AI output with fitting existing values. Exact, alias, learned, structural, and semantic matching are configured under Bridge > Self-learning Bridge. Requires AI Tagging via Ollama.")
+            .setDesc("Indexes configured vault vocabulary before processing and enhances AI output with fitting existing values. Core and adaptive matching are configured below. Requires AI Tagging via Ollama.")
             .addToggle(toggle => toggle
                 .setValue(this.plugin.settings.vaultAwarenessEnabled)
                 .onChange(async (value) => {
                     this.plugin.settings.vaultAwarenessEnabled = value;
                     await this.plugin.saveSettings();
                     this.plugin.scheduleVaultVocabularyCacheBuild();
+                    this.animateInlineDependencyWarning(vaultToggleWarningHostEl!, renderVaultToggleWarning);
+                    this.syncRenderedVaultVocabularyControls();
                     if (value) {
                         this.animateSettingsCollapseThenRender(vaultHowHostEl, renderVaultHow);
-                        this.animateSettingsContent(vaultHostEl, renderVaultEnabled);
                     } else {
                         this.animateSettingsContent(vaultHowHostEl, renderVaultHow);
-                        this.animateSettingsCollapseThenRender(vaultHostEl, renderVaultEnabled);
                     }
-                    this.animateInlineDependencyWarning(vaultToggleWarningHostEl!, renderVaultToggleWarning);
+                    this.animateExistingSettingsVisibility(vaultHostEl, value);
                     refreshBridgeDependencies();
                 })),
             "Enable Vault Awareness",
@@ -16455,7 +18067,6 @@ class AutotagSettingTab extends PluginSettingTab {
         const vaultHostEl = containerEl.createDiv();
         const renderVaultEnabled = () => {
             vaultHostEl.empty();
-            if (!this.plugin.settings.vaultAwarenessEnabled) return;
             const vaultBodyEl = this.createSettingsRevealContainer(vaultHostEl);
             vaultBodyEl.createEl("h4", { text: "Vault Setup" });
 
@@ -16497,9 +18108,9 @@ class AutotagSettingTab extends PluginSettingTab {
                         await this.plugin.saveSettings();
                         this.refreshDisplayAnimated();
                     }));
-            vaultBodyEl.createEl("h4", { text: "Vault Awareness Candidates" });
+            vaultBodyEl.createEl("h4", { text: "Vocabulary Sources" });
             const candidatePanelEl = vaultBodyEl.createDiv({ cls: "autotag-property-panel autotag-vault-candidates-panel" });
-            candidatePanelEl.createEl("h5", { text: "Vocabulary Sources" });
+            candidatePanelEl.createEl("h5", { text: "Active Vocabulary Properties" });
             new Setting(candidatePanelEl)
                 .setName("Excluded Candidate Terms")
                 .setDesc("Terms that should never be sent as vault vocabulary candidates, comma separated.")
@@ -16516,34 +18127,169 @@ class AutotagSettingTab extends PluginSettingTab {
                     });
                 });
 
-            const candidateProperties = this.plugin.getVaultAwarenessCandidateProperties();
+            const candidateSummaryHostEl = candidatePanelEl.createDiv({ cls: "autotag-vault-candidate-summary" });
+            const renderCandidateSummary = () => {
+                candidateSummaryHostEl.empty();
+                const candidateProperties = this.plugin.getVaultAwarenessCandidateProperties();
+                candidateSummaryHostEl.createEl("p", {
+                    text: candidateProperties.length > 0
+                        ? "Properties currently scanned across the whole vault as Vault Awareness vocabulary sources. Their saved values become eligible candidates; a value is written only when the current file supplies supporting evidence:"
+                        : "No properties are currently used as Vault Awareness vocabulary sources. Enable a Vault Awareness vocabulary toggle on a property to index its existing values across the vault.",
+                    cls: "setting-item-description",
+                });
+                const candidateListEl = candidateSummaryHostEl.createDiv({ cls: "autotag-vault-candidate-list" });
+                candidateProperties.forEach(property => {
+                    candidateListEl.createSpan({ text: property, cls: "autotag-vault-candidate-chip" });
+                });
+                if (this.plugin.settings.bridgeEnabled && this.plugin.settings.bridgeUsePreBridgeVaultAwarenessOutput) {
+                    candidateListEl.createSpan({ text: "Setting: Pre-Bridge", cls: "autotag-vault-candidate-chip autotag-vault-candidate-chip-setting" });
+                }
+            };
+            renderCandidateSummary();
+            this.refreshVaultVocabularyCandidateSummary = renderCandidateSummary;
+
+            candidatePanelEl.createEl("h5", { text: "Additional Vocabulary Properties" });
             candidatePanelEl.createEl("p", {
-                text: candidateProperties.length > 0
-                    ? "Properties currently scanned across the whole vault as Vault Awareness vocabulary sources. All existing frontmatter values in these properties can become candidates:"
-                    : "No properties are currently used as Vault Awareness vocabulary sources. Enable the Vault Awareness vocabulary toggles under Folder Tags or Tags generated by AI to scan those properties across the whole vault.",
+                text: "Add any other frontmatter property whose existing values should be eligible Vault Awareness vocabulary. Matching property names elsewhere are detected, linked, and kept synchronized.",
                 cls: "setting-item-description",
             });
-            const candidateListEl = candidatePanelEl.createDiv({ cls: "autotag-vault-candidate-list" });
-            candidateProperties.forEach(property => {
-                candidateListEl.createSpan({ text: property, cls: "autotag-vault-candidate-chip" });
+            const additionalSourcesEl = candidatePanelEl.createDiv({ cls: "autotag-vault-additional-sources" });
+            this.plugin.settings.additionalVaultVocabularyProperties.forEach((source, index) => {
+                const sourceEl = additionalSourcesEl.createDiv({ cls: "autotag-vault-additional-source" });
+                sourceEl.id = `autotag-vault-vocabulary-source-${source.id}`;
+                const overlapHostEl = sourceEl.createDiv();
+                const renderOverlapNotice = () => {
+                    overlapHostEl.empty();
+                    this.renderVaultVocabularyOverlapNotice(overlapHostEl, source.property, `additional:${source.id}`);
+                };
+                renderOverlapNotice();
+                const sourceSetting = new Setting(sourceEl)
+                    .setName(`Vocabulary Source ${index + 1}`)
+                    .setDesc("Type any frontmatter property name or choose a searchable suggestion. Removing this row does not delete that property or any note values.")
+                    .addText(text => {
+                        this.attachTextSuggestions(text.inputEl, this.getPropertyNameSuggestions());
+                        text.setPlaceholder("property-name")
+                            .setValue(source.property)
+                            .onChange(async value => {
+                                source.property = this.plugin.normalizePropertyName(value, "");
+                                this.plugin.synchronizeOverlappingVaultVocabularySources();
+                                await this.plugin.saveSettings();
+                                this.plugin.scheduleVaultVocabularyCacheBuild();
+                                this.syncRenderedVaultVocabularyControls();
+                                this.refreshRenderedVaultVocabularyOverlapNotices();
+                                this.refreshVaultVocabularyCandidateSummary?.();
+                            });
+                    })
+                    .addToggle(toggle => {
+                        toggle
+                            .setValue(this.plugin.isVaultVocabularyPropertyEnabled(source.property))
+                            .setTooltip("Use property as Vault Awareness vocabulary")
+                            .onChange(async value => {
+                                if (source.property) {
+                                    this.plugin.setVaultVocabularyPropertyEnabled(source.property, value);
+                                } else {
+                                    source.useAsVaultCandidate = value;
+                                }
+                                await this.plugin.saveSettings();
+                                this.plugin.scheduleVaultVocabularyCacheBuild();
+                                this.syncRenderedVaultVocabularyControls();
+                                this.refreshVaultVocabularyCandidateSummary?.();
+                            });
+                        this.vaultVocabularyToggleControls.push({
+                            getProperty: () => source.property,
+                            setValue: nextValue => toggle.setValue(nextValue),
+                            value: this.plugin.isVaultVocabularyPropertyEnabled(source.property),
+                        });
+                    })
+                    .addButton(button => button
+                        .setIcon("trash")
+                        .setTooltip("Remove vocabulary source")
+                        .onClick(async () => {
+                            this.plugin.settings.additionalVaultVocabularyProperties = this.plugin.settings.additionalVaultVocabularyProperties
+                                .filter(candidate => candidate.id !== source.id);
+                            await this.plugin.saveSettings();
+                            this.plugin.scheduleVaultVocabularyCacheBuild();
+                            this.refreshDisplayAnimated();
+                        }));
+                sourceSetting.settingEl.addClass("autotag-vault-additional-source-setting");
             });
-            if (this.plugin.settings.bridgeEnabled && this.plugin.settings.bridgeUsePreBridgeVaultAwarenessOutput) {
-                candidateListEl.createSpan({ text: "Setting: Pre-Bridge", cls: "autotag-vault-candidate-chip autotag-vault-candidate-chip-setting" });
-            }
+            new Setting(candidatePanelEl)
+                .setName("Add vocabulary property")
+                .setDesc("Adds another property source for Vault Awareness to scan across the vault.")
+                .addButton(button => button
+                    .setButtonText("Add property")
+                    .setCta()
+                    .onClick(async () => {
+                        this.plugin.settings.additionalVaultVocabularyProperties.push({
+                            id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+                            property: "",
+                            useAsVaultCandidate: true,
+                        });
+                        await this.plugin.saveSettings();
+                        this.refreshDisplayAnimated();
+                    }));
+
+            vaultBodyEl.createEl("h4", { text: "Core Matching" });
+            const coreMatchingPanelEl = vaultBodyEl.createDiv({ cls: "autotag-property-panel autotag-vault-matching-panel" });
+            coreMatchingPanelEl.createEl("p", {
+                text: "Core matching compares current evidence with existing Vault Awareness vocabulary locally. It remains available independently of Adaptive Vault Matching.",
+                cls: "setting-item-description",
+            });
+            new Setting(coreMatchingPanelEl)
+                .setName("Exact Matches")
+                .setDesc("Accepts an existing vocabulary value when that exact value appears in active evidence.")
+                .addToggle(toggle => toggle
+                    .setValue(this.plugin.settings.vaultMatchingTiers.exact)
+                    .onChange(async value => {
+                        this.plugin.settings.vaultMatchingTiers.exact = value;
+                        await this.plugin.saveSettings();
+                    }));
+            new Setting(coreMatchingPanelEl)
+                .setName("Vault Aliases")
+                .setDesc("Accepts a canonical vocabulary value when one of its configured Obsidian aliases appears in active evidence.")
+                .addToggle(toggle => toggle
+                    .setValue(this.plugin.settings.vaultMatchingTiers.aliases)
+                    .onChange(async value => {
+                        this.plugin.settings.vaultMatchingTiers.aliases = value;
+                        await this.plugin.saveSettings();
+                    }));
+
+            vaultBodyEl.createDiv({ attr: { id: "autotag-adaptive-vault-matching-slot" } });
 
             vaultBodyEl.createEl("h4", { text: "Vault Awareness Output" });
             const outputPanelEl = vaultBodyEl.createDiv({ cls: "autotag-property-panel autotag-vault-output-panel" });
             outputPanelEl.createEl("h5", { text: "Recognized Vault Tags" });
             outputPanelEl.createEl("p", {
-                text: "By default, recognized Vault Awareness tags feed back into AI Tags. Enable separate output to also route those recognized vault tags into another property.",
+                text: "Without a separate output property, recognized Vault Awareness tags can be added to AI Tags. With separate output enabled, additive matching keeps the original AI wording and routes recognized vault wording to the Vault Awareness property.",
                 cls: "setting-item-description",
             });
+
+            new Setting(outputPanelEl)
+                .setName("Add Vault matches without replacing AI Tags")
+                .setDesc("When enabled, Autotag keeps the original AI wording. If separate Vault Awareness output is enabled, recognized vault wording is written only there; otherwise it is added alongside the original AI tag. When disabled, canonical vault wording replaces matching AI wording and follows the Exclusive Vault Awareness Output setting.")
+                .addToggle(toggle => toggle
+                    .setValue(this.plugin.settings.vaultAwarenessPreserveOriginalAiTags)
+                    .onChange(async value => {
+                        this.plugin.settings.vaultAwarenessPreserveOriginalAiTags = value;
+                        await this.plugin.saveSettings();
+                    }));
 
             let outputFieldsHostEl: HTMLElement;
             const renderVaultAwarenessOutputFields = () => {
                 outputFieldsHostEl.empty();
                 if (!this.plugin.settings.vaultAwarenessOutputEnabled) return;
                 const outputFieldsEl = this.createSettingsRevealContainer(outputFieldsHostEl);
+
+                const outputVaultOverlapHostEl = outputFieldsEl.createDiv();
+                const renderOutputVaultOverlapNotice = () => {
+                    outputVaultOverlapHostEl.empty();
+                    this.renderVaultVocabularyOverlapNotice(
+                        outputVaultOverlapHostEl,
+                        this.plugin.getVaultAwarenessOutputPropertyName(),
+                        "vault-output"
+                    );
+                };
+                renderOutputVaultOverlapNotice();
 
                 const outputPropertySetting = new Setting(outputFieldsEl)
                     .setName("Vault Awareness Tags Property")
@@ -16554,10 +18300,38 @@ class AutotagSettingTab extends PluginSettingTab {
                             .setValue(this.plugin.settings.vaultAwarenessOutputPropertyName)
                             .onChange(async value => {
                                 this.plugin.settings.vaultAwarenessOutputPropertyName = this.plugin.normalizePropertyName(value, DEFAULT_SETTINGS.vaultAwarenessOutputPropertyName);
+                                this.plugin.synchronizeOverlappingVaultVocabularySources();
                                 await this.plugin.saveSettings();
+                                if (this.plugin.settings.vaultAwarenessOutputUseAsVaultCandidate) this.plugin.scheduleVaultVocabularyCacheBuild();
+                                this.syncRenderedVaultVocabularyControls();
+                                this.refreshRenderedVaultVocabularyOverlapNotices();
+                                this.refreshVaultVocabularyCandidateSummary?.();
                             });
                     });
                 outputPropertySetting.settingEl.id = "autotag-vault-awareness-output-property";
+
+                this.setSettingNameWithIcon(
+                    new Setting(outputFieldsEl)
+                        .setDesc("Adds existing values from the Vault Awareness output property back into the vocabulary index. Use this carefully because accepted output can influence later files.")
+                        .addToggle(toggle => {
+                            toggle
+                                .setValue(this.plugin.isVaultVocabularyPropertyEnabled(this.plugin.getVaultAwarenessOutputPropertyName()))
+                                .onChange(async value => {
+                                    this.plugin.setVaultVocabularyPropertyEnabled(this.plugin.getVaultAwarenessOutputPropertyName(), value);
+                                    await this.plugin.saveSettings();
+                                    this.plugin.scheduleVaultVocabularyCacheBuild();
+                                    this.syncRenderedVaultVocabularyControls();
+                                    this.refreshVaultVocabularyCandidateSummary?.();
+                                });
+                            this.vaultVocabularyToggleControls.push({
+                                getProperty: () => this.plugin.getVaultAwarenessOutputPropertyName(),
+                                setValue: nextValue => toggle.setValue(nextValue),
+                                value: this.plugin.isVaultVocabularyPropertyEnabled(this.plugin.getVaultAwarenessOutputPropertyName()),
+                            });
+                        }),
+                    "Use property as Vault Awareness vocabulary",
+                    this.getSettingsSectionIcon("vault-awareness")
+                );
 
                 const outputFormatSetting = new Setting(outputFieldsEl)
                     .setName("Vault Awareness Tags Format")
@@ -16578,7 +18352,7 @@ class AutotagSettingTab extends PluginSettingTab {
 
                 new Setting(outputFieldsEl)
                     .setName("Exclusive Vault Awareness Output")
-                    .setDesc("When enabled, recognized Vault Awareness tags are written only to the selected property and are kept out of AI Tags. When disabled, they are written to both places.")
+                    .setDesc("Controls replacement mode when 'Add Vault matches without replacing AI Tags' is disabled. When enabled, recognized Vault Awareness tags are written only to this property; when disabled, canonical values may also be written to AI Tags. Additive mode already keeps separate output distinct.")
                     .addToggle(toggle => toggle
                         .setValue(this.plugin.settings.vaultAwarenessOutputExclusive)
                         .onChange(async value => {
@@ -16608,7 +18382,11 @@ class AutotagSettingTab extends PluginSettingTab {
             this.enhanceInfoDescriptionAnimations(vaultBodyEl);
         };
         renderVaultEnabled();
-        if (this.plugin.settings.vaultAwarenessEnabled) this.forceSettingsBodyOpen(vaultHostEl);
+        if (this.plugin.settings.vaultAwarenessEnabled) {
+            this.forceSettingsBodyOpen(vaultHostEl);
+        } else {
+            vaultHostEl.style.display = "none";
+        }
         this.createSettingsAnchor(containerEl, "ai-tags", "AI Tags");
         this.renderProblemWarningPanel(
             containerEl,
@@ -16700,9 +18478,6 @@ class AutotagSettingTab extends PluginSettingTab {
                     const wasAnyEnabled = isAnyAiOutputEnabled();
                     this.plugin.settings.aiTaggingEnabled = value;
                     await this.plugin.saveSettings();
-                    if (this.plugin.settings.vaultAwarenessEnabled) {
-                        this.animateSettingsContent(vaultHostEl, renderVaultEnabled);
-                    }
                     this.animateInlineDependencyWarning(vaultToggleWarningHostEl!, renderVaultToggleWarning);
                     updateAiFeatureVisibility(wasAnyEnabled);
                     refreshBridgeDependencies();
@@ -16714,15 +18489,14 @@ class AutotagSettingTab extends PluginSettingTab {
         this.createSettingsAnchor(containerEl, "bridge", "Bridge");
         const bridgeHowHostEl = containerEl.createDiv();
         const shouldShowBridgeHow = () => !this.plugin.settings.bridgeEnabled
-            && !this.plugin.settings.manualEnrichmentEnabled
-            && !this.plugin.settings.selfLearningBridgeEnabled;
+            && !this.plugin.settings.manualEnrichmentEnabled;
         const renderBridgeHow = () => {
             bridgeHowHostEl.empty();
             if (!shouldShowBridgeHow()) return;
             this.renderHowItWorksPanel(
                 bridgeHowHostEl,
                 "How Bridge Enrichment works",
-                "Bridge Enrichment lets your own rules add related concepts. Evidence-aware rules use the AI tagging pass, direct expansion applies deterministic rules, and Self-learning Bridge learns reusable relationships between current evidence and existing Vault Awareness vocabulary."
+                "Bridge Enrichment lets your own rules add related concepts. Evidence-aware rules use the AI tagging pass, while direct expansion applies deterministic rules against the enabled Bridge inputs."
             );
         };
         renderBridgeHow();
@@ -16732,8 +18506,10 @@ class AutotagSettingTab extends PluginSettingTab {
             bridgeHostEl.empty();
             const bridgeBodyEl = this.createSettingsRevealContainer(bridgeHostEl);
             bridgeBodyEl.createEl("h4", { text: "Bridge Enrichment Rules" });
-            const rerenderBridge = () => this.animateSettingsContent(bridgeHostEl, renderBridgeEnabled);
             const bridgeRulesEnabled = this.plugin.settings.bridgeEnabled || this.plugin.settings.manualEnrichmentEnabled;
+            let bridgeDetailsHostEl: HTMLElement | null = null;
+            let bridgeDetailsEl: HTMLElement | null = null;
+            let renderBridgeDetailsVisibility: () => void = () => undefined;
             let evidenceWarningHostEl: HTMLElement | null = null;
             let directExpansionWarningHostEl: HTMLElement | null = null;
             let bridgeEngineWarningHostEl: HTMLElement | null = null;
@@ -16855,19 +18631,17 @@ class AutotagSettingTab extends PluginSettingTab {
             };
             const updateBridgeAfterEngineToggle = (wasEnabled: boolean, updateWarnings: () => void) => {
                 const isEnabled = this.plugin.settings.bridgeEnabled
-                    || this.plugin.settings.manualEnrichmentEnabled
-                    || this.plugin.settings.selfLearningBridgeEnabled;
+                    || this.plugin.settings.manualEnrichmentEnabled;
                 if (wasEnabled !== isEnabled) {
                     if (isEnabled) {
                         this.animateSettingsCollapseThenRender(bridgeHowHostEl, renderBridgeHow);
+                        if (bridgeDetailsHostEl) this.animateSettingsContent(bridgeDetailsHostEl, renderBridgeDetailsVisibility);
                     } else {
                         this.animateSettingsContent(bridgeHowHostEl, renderBridgeHow);
+                        if (bridgeDetailsHostEl) this.animateSettingsCollapseThenRender(bridgeDetailsHostEl, renderBridgeDetailsVisibility);
                     }
-                    rerenderBridge();
-                } else {
-                    updateWarnings();
-                    rerenderBridge();
                 }
+                updateWarnings();
             };
 
             new Setting(bridgeBodyEl)
@@ -16877,8 +18651,7 @@ class AutotagSettingTab extends PluginSettingTab {
                     .setValue(this.plugin.settings.bridgeEnabled)
                     .onChange(async value => {
                         const wasEnabled = this.plugin.settings.bridgeEnabled
-                            || this.plugin.settings.manualEnrichmentEnabled
-                            || this.plugin.settings.selfLearningBridgeEnabled;
+                            || this.plugin.settings.manualEnrichmentEnabled;
                         this.plugin.settings.bridgeEnabled = value;
                         await this.plugin.saveSettings();
                         updateBridgeAfterEngineToggle(wasEnabled, () => {
@@ -16899,8 +18672,7 @@ class AutotagSettingTab extends PluginSettingTab {
                     .setValue(this.plugin.settings.manualEnrichmentEnabled)
                     .onChange(async value => {
                         const wasEnabled = this.plugin.settings.bridgeEnabled
-                            || this.plugin.settings.manualEnrichmentEnabled
-                            || this.plugin.settings.selfLearningBridgeEnabled;
+                            || this.plugin.settings.manualEnrichmentEnabled;
                         this.plugin.settings.manualEnrichmentEnabled = value;
                         await this.plugin.saveSettings();
                         updateBridgeAfterEngineToggle(wasEnabled, () => {
@@ -16914,10 +18686,11 @@ class AutotagSettingTab extends PluginSettingTab {
             bridgeEngineWarningHostEl = bridgeBodyEl.createDiv();
             renderBridgeEngineWarning();
 
-            if (bridgeRulesEnabled) {
-                bridgeBodyEl.createEl("h4", { text: "Bridge Inputs" });
+            bridgeDetailsHostEl = bridgeBodyEl.createDiv();
+            bridgeDetailsEl = this.createSettingsRevealContainer(bridgeDetailsHostEl);
+            bridgeDetailsEl.createEl("h4", { text: "Bridge Inputs" });
 
-            new Setting(bridgeBodyEl)
+            new Setting(bridgeDetailsEl)
                 .setName("Use filename input")
                 .setDesc("Lets evidence-aware Bridge rules use active filename candidates as evidence.")
                 .addToggle(toggle => toggle
@@ -16929,11 +18702,11 @@ class AutotagSettingTab extends PluginSettingTab {
                         animateBridgeWarning(directExpansionWarningHostEl, renderDirectExpansionWarning);
                         animateBridgeWarning(bridgeEngineWarningHostEl, renderBridgeEngineWarning);
                     }));
-            filenameWarningHostEl = bridgeBodyEl.createDiv();
+            filenameWarningHostEl = bridgeDetailsEl.createDiv();
             renderFilenameWarning();
 
             this.setSettingNameWithIcon(
-                new Setting(bridgeBodyEl)
+                new Setting(bridgeDetailsEl)
                     .setDesc("Lets evidence-aware Bridge rules use Folder Tags candidates that are set to Consider or All Keywords.")
                     .addToggle(toggle => toggle
                         .setValue(this.plugin.settings.bridgeUseFolderInput)
@@ -16947,11 +18720,11 @@ class AutotagSettingTab extends PluginSettingTab {
                 "Use Folder Tags input",
                 this.getSettingsSectionIcon("folder-tags")
             );
-            folderWarningHostEl = bridgeBodyEl.createDiv();
+            folderWarningHostEl = bridgeDetailsEl.createDiv();
             renderFolderWarning();
 
             this.setSettingNameWithIcon(
-                new Setting(bridgeBodyEl)
+                new Setting(bridgeDetailsEl)
                     .setDesc("Lets evidence-aware Bridge rules use the AI image description and lets direct expansion rules use accepted/generated AI tags when AI Tagging is enabled.")
                     .addToggle(toggle => toggle
                         .setValue(this.plugin.settings.bridgeUseAiInput)
@@ -16966,13 +18739,13 @@ class AutotagSettingTab extends PluginSettingTab {
                 "Use AI input",
                 this.getSettingsSectionIcon("ai-tags")
             );
-            aiInputTaggingWarningHostEl = bridgeBodyEl.createDiv();
+            aiInputTaggingWarningHostEl = bridgeDetailsEl.createDiv();
             renderAiInputTaggingWarning();
-            aiInputOffWarningHostEl = bridgeBodyEl.createDiv();
+            aiInputOffWarningHostEl = bridgeDetailsEl.createDiv();
             renderAiInputOffWarning();
 
             this.setSettingNameWithIcon(
-                new Setting(bridgeBodyEl)
+                new Setting(bridgeDetailsEl)
                     .setDesc("Lets evidence-aware Bridge rules use known GPS and reverse-geocode metadata.")
                     .addToggle(toggle => toggle
                         .setValue(this.plugin.settings.bridgeUseGeolocationInput)
@@ -16986,11 +18759,11 @@ class AutotagSettingTab extends PluginSettingTab {
                 "Use Geolocation input",
                 this.getSettingsSectionIcon("geolocation")
             );
-            geolocationWarningHostEl = bridgeBodyEl.createDiv();
+            geolocationWarningHostEl = bridgeDetailsEl.createDiv();
             renderGeolocationWarning();
 
             this.setSettingNameWithIcon(
-                new Setting(bridgeBodyEl)
+                new Setting(bridgeDetailsEl)
                 .setDesc("When Vault Awareness writes to a separate output property, include evidence-aware Bridge terms in addition to basic Vault Awareness selections. A matched source includes its rule targets; a target that is directly present inside a longer phrase can also be kept without running the rule backward. Example: House => Architecture can output House and Architecture from House evidence, while Gothic Architecture can output Architecture without inventing House.")
                 .addToggle(toggle => toggle
                     .setValue(this.plugin.settings.bridgeUsePreBridgeVaultAwarenessOutput)
@@ -17002,13 +18775,16 @@ class AutotagSettingTab extends PluginSettingTab {
                 "Use Pre-Bridge Terms in Vault Awareness Output",
                 this.getSettingsSectionIcon("vault-awareness")
             );
-                vaultOutputWarningHostEl = bridgeBodyEl.createDiv();
-                renderVaultOutputWarning();
-            }
+            vaultOutputWarningHostEl = bridgeDetailsEl.createDiv();
+            renderVaultOutputWarning();
 
-            if (bridgeRulesEnabled) bridgeBodyEl.createEl("h4", { text: "Bridge Matching" });
+            bridgeDetailsEl.createEl("h4", { text: "Bridge Matching" });
 
-            const selfLearningPanelEl = bridgeBodyEl.createDiv({ cls: "autotag-property-panel autotag-vault-candidates-panel" });
+            const adaptiveVaultSectionEl = bridgeBodyEl.createDiv({
+                attr: { id: "autotag-adaptive-vault-matching-section" },
+            });
+            adaptiveVaultSectionEl.createEl("h4", { text: "Adaptive Vault Matching" });
+            const selfLearningPanelEl = adaptiveVaultSectionEl.createDiv({ cls: "autotag-property-panel autotag-vault-candidates-panel" });
             let selfLearningEnabledWarningHostEl: HTMLElement | null = null;
             let selfLearningDependencyWarningHostEl: HTMLElement | null = null;
             const renderSelfLearningEnabledWarning = () => {
@@ -17016,9 +18792,9 @@ class AutotagSettingTab extends PluginSettingTab {
                 selfLearningEnabledWarningHostEl.empty();
                 this.renderInlineDependencyWarning(
                     selfLearningEnabledWarningHostEl,
-                    "Self-learning Bridge can change Vault Awareness output",
+                    "Adaptive matching can change Vault Awareness output",
                     this.plugin.settings.selfLearningBridgeEnabled
-                        ? ["This advanced matcher learns and reuses wording relationships. Incorrect relationships can cause false positives across later files, so review learned relationships and use the confidence threshold deliberately."]
+                        ? ["Adaptive Vault Matching learns and reuses wording relationships. Incorrect relationships can cause false positives across later files, so review learned relationships and use the confidence threshold deliberately."]
                         : [],
                     this.getSettingsSectionIcon("bridge")
                 );
@@ -17028,14 +18804,14 @@ class AutotagSettingTab extends PluginSettingTab {
                 selfLearningDependencyWarningHostEl.empty();
                 const lines: string[] = [];
                 if (this.plugin.settings.selfLearningBridgeEnabled && !this.plugin.settings.vaultAwarenessEnabled) {
-                    lines.push("Self-learning Bridge needs Vault Awareness because it only maps evidence to existing Vault Awareness vocabulary.");
+                    lines.push("Adaptive Vault Matching needs Vault Awareness because it only maps evidence to existing Vault Awareness vocabulary.");
                 }
                 if (this.plugin.settings.selfLearningBridgeEnabled && !this.plugin.settings.aiTaggingEnabled) {
-                    lines.push("Self-learning Bridge runs during AI Tagging, so it cannot learn or add values until AI Tagging is enabled.");
+                    lines.push("Adaptive Vault Matching runs during AI Tagging, so it cannot learn or add values until AI Tagging is enabled.");
                 }
                 this.renderInlineDependencyWarning(
                     selfLearningDependencyWarningHostEl,
-                    "Self-learning Bridge dependency",
+                    "Adaptive Vault Matching dependency",
                     lines,
                     this.getSettingsSectionIcon("vault-awareness")
                 );
@@ -17047,7 +18823,7 @@ class AutotagSettingTab extends PluginSettingTab {
 
                 const panelEl = this.createSettingsRevealContainer(selfLearningHostEl);
                 panelEl.createEl("p", {
-                    text: "Matches active evidence against existing Vault Awareness vocabulary. Exact and alias matching are local and independently toggleable below. Basic inflections can be learned locally from one evidence channel; derived word forms require two distinct evidence channels. Ambiguous structural and semantic matches use one bounded Ollama verification request. Turning this feature off keeps the saved cache but disables every matching tier, learning, and reuse.",
+                    text: "Extends Core Matching with reusable learned, structural, and semantic relationships. Exact aliases and basic inflections stay local. Every new nontrivial pair is judged independently in a bounded Ollama verification batch; a rejected strong word-family match receives one focused disagreement check. Only semantically safe mappings can be learned. Relationship confidence describes the connection itself, while observations and independent evidence remain separate support signals. Turning this feature off keeps the saved cache while exact and alias matching continue to work.",
                     cls: "setting-item-description",
                 });
 
@@ -17072,11 +18848,9 @@ class AutotagSettingTab extends PluginSettingTab {
                         }));
 
                 const matchingTierOptions: { key: keyof VaultMatchingTierSettings; name: string; description: string }[] = [
-                    { key: "exact", name: "Exact Matches", description: "Accepts an existing vocabulary value when that exact value appears in active evidence." },
-                    { key: "aliases", name: "Vault Aliases", description: "Accepts a canonical vocabulary value when one of its configured Obsidian aliases appears." },
-                    { key: "learned", name: "Learned Relationships", description: "Reuses previously verified wording relationships locally without another Ollama request." },
-                    { key: "structural", name: "Structural Relationships", description: "Accepts basic inflections locally from one evidence channel. Derived forms require two distinct channels; ambiguous compounds, spelling variants, and acronyms still require verification." },
-                    { key: "semantic", name: "Semantic Relationships", description: "Uses compact lookup hints from the normal AI Tags response to shortlist direct synonyms and immediate broader or narrower concepts." },
+                    { key: "learned", name: "Learned Relationships", description: "Reuses only relationships that meet their calibrated confidence and independent-support requirements. Provisional entries remain reviewable but inactive." },
+                    { key: "structural", name: "Structural Relationships", description: "Accepts strong basic inflections locally. New derived word forms are verified semantically; compounds and spelling similarities remain conservatively capped and require independent support before reuse." },
+                    { key: "semantic", name: "Semantic Relationships", description: "Uses compact lookup hints from the normal AI Tags response to shortlist direct synonyms and immediate broader or narrower concepts, then verifies every shortlisted pair independently." },
                 ];
                 matchingTierOptions.forEach(option => {
                     new Setting(panelEl)
@@ -17179,7 +18953,7 @@ class AutotagSettingTab extends PluginSettingTab {
 
                 new Setting(panelEl)
                     .setName("Minimum relationship confidence")
-                    .setDesc("Relationships below this score are rejected from future proposals and cannot affect current or later Vault Awareness output. Raising the threshold asks for confirmation before existing relationships are discarded. Lower values retain more uncertain mappings; higher values reduce false positives but may require more Ollama verification. Default is 60%.")
+                    .setDesc("Relationships below this calibrated score are rejected from future proposals. Relationships at or above it are retained, but provisional entries still cannot affect Vault Awareness until their type-specific independent-support requirement is met. Scores of 90% or higher are reserved for strongly corroborated or deterministic mappings. Raising the threshold asks for confirmation before existing relationships are discarded. Default is 60%.")
                     .addSlider(slider => {
                         slider
                             .setLimits(0, 100, 5)
@@ -17204,7 +18978,7 @@ class AutotagSettingTab extends PluginSettingTab {
                     const rejectedCount = this.plugin.settings.rejectedVaultRelations.length;
                     learnedRelationshipsHostEl.createEl("p", {
                         text: relationCount > 0
-                            ? `${relationCount} accepted relationship${relationCount === 1 ? "" : "s"} and ${rejectedCount} temporary rejection${rejectedCount === 1 ? "" : "s"} retained. Open the operational file to review them.`
+                            ? `${relationCount} retained relationship${relationCount === 1 ? "" : "s"} and ${rejectedCount} temporary rejection${rejectedCount === 1 ? "" : "s"}. Provisional relationships stay reviewable but cannot affect Vault Awareness until independently supported.`
                             : rejectedCount > 0
                                 ? `${rejectedCount} temporary rejection${rejectedCount === 1 ? "" : "s"} retained. No reusable relationship has been learned yet.`
                                 : "No relationships have been learned yet. Structural matching or Ollama verification can add one when existing vocabulary appears through different wording.",
@@ -17247,19 +19021,82 @@ class AutotagSettingTab extends PluginSettingTab {
                                 await this.plugin.saveSettings();
                                 await this.plugin.syncLearnedVaultRelationsNote();
                                 renderLearnedRelationships();
-                                new Notice("Cleared Self-learning Bridge relationships.");
+                                new Notice("Cleared Adaptive Vault Matching relationships.");
                             }));
+
+                    learnedRelationshipsHostEl.createEl("h5", { text: "Filename Filler Words Discard Collection" });
+                    const fillerDetailsHostEl = learnedRelationshipsHostEl.createDiv();
+                    const renderFillerDetails = () => {
+                        fillerDetailsHostEl.empty();
+                        if (!this.plugin.settings.filenameFillerWordsEnabled) return;
+                        const learnedFillerWordCount = this.plugin.settings.learnedFilenameStopWords.length;
+                        const reusableFillerWordCount = this.plugin.settings.learnedFilenameStopWords
+                            .filter(entry => this.plugin.isLearnedFilenameStopWordReusable(entry)).length;
+                        fillerDetailsHostEl.createEl("p", {
+                            text: learnedFillerWordCount > 0
+                                ? `${learnedFillerWordCount} learned filename filler word${learnedFillerWordCount === 1 ? "" : "s"}; ${reusableFillerWordCount} currently discard filename candidates. Provisional words need support from two different files before automatic use.`
+                                : "Built-in filler examples include the, and, of, und, and oder. The existing AI tag request can also propose repeated workflow filler such as final, export, or original without an extra Ollama call; learned words remain provisional until two different files support them or you accept them manually.",
+                            cls: "setting-item-description",
+                        });
+                        new Setting(fillerDetailsHostEl)
+                            .setName("Review learned filename filler words")
+                            .setDesc("Search learned words, inspect confidence and distinct-file support, then accept, reject, or delete each decision.")
+                            .addButton(button => button
+                                .setButtonText("Review Filler Words")
+                                .setDisabled(learnedFillerWordCount === 0)
+                                .onClick(() => new LearnedFilenameStopWordsReviewModal(
+                                    this.app,
+                                    this.plugin,
+                                    () => renderLearnedRelationships()
+                                ).open()));
+                        new Setting(fillerDetailsHostEl)
+                            .setName("Clear learned filename filler words")
+                            .setDesc("Forgets accepted, provisional, and rejected learned filler words. Built-in English and German filler words are unchanged.")
+                            .addButton(button => button
+                                .setButtonText("Clear")
+                                .setWarning()
+                                .setDisabled(learnedFillerWordCount === 0)
+                                .onClick(() => new ConfirmDestructiveActionModal(
+                                    this.app,
+                                    "Clear learned filename filler words?",
+                                    "This forgets every learned filename filler-word decision in this vault. Built-in filler words are not changed.",
+                                    "Clear Filler Words",
+                                    async () => {
+                                        this.plugin.settings.learnedFilenameStopWords = [];
+                                        await this.plugin.saveSettings();
+                                        renderLearnedRelationships();
+                                        new Notice("Cleared learned filename filler words.");
+                                    }
+                                ).open()));
+                        this.enhanceInfoDescriptionAnimations(fillerDetailsHostEl);
+                    };
+                    const fillerToggleSetting = new Setting(learnedRelationshipsHostEl)
+                        .setName("Enable Filename Filler Words Discard Collection")
+                        .setDesc("Removes low-value filler from filename candidates before AI Tags and Vault Awareness use them. Built-in examples include the, and, of, und, and oder; Adaptive Vault Matching can conservatively learn additional repeated filler. Turning this off preserves the learned collection.")
+                        .addToggle(toggle => toggle
+                            .setValue(this.plugin.settings.filenameFillerWordsEnabled)
+                            .onChange(async value => {
+                                this.plugin.settings.filenameFillerWordsEnabled = value;
+                                await this.plugin.saveSettings();
+                                if (value) {
+                                    this.animateSettingsContent(fillerDetailsHostEl, renderFillerDetails);
+                                } else {
+                                    this.animateSettingsCollapseThenRender(fillerDetailsHostEl, renderFillerDetails);
+                                }
+                            }));
+                    learnedRelationshipsHostEl.insertBefore(fillerToggleSetting.settingEl, fillerDetailsHostEl);
+                    renderFillerDetails();
+                    if (this.plugin.settings.filenameFillerWordsEnabled) this.forceSettingsBodyOpen(fillerDetailsHostEl);
                     this.enhanceInfoDescriptionAnimations(learnedRelationshipsHostEl);
                 };
                 renderLearnedRelationships();
             };
 
             const selfLearningToggleSetting = new Setting(selfLearningPanelEl)
-                    .setDesc("Controls exact, alias, learned, structural, and semantic matching against existing Vault Awareness vocabulary. Default is on. Turning it off disables matching and learning without deleting saved relationships.")
+                    .setDesc("Controls learned, structural, and semantic relationship matching against existing Vault Awareness vocabulary. Default is on. Turning it off preserves the saved cache and leaves Core Matching available.")
                     .addToggle(toggle => toggle
                         .setValue(this.plugin.settings.selfLearningBridgeEnabled)
                         .onChange(async value => {
-                            const wasEnabled = bridgeRulesEnabled || this.plugin.settings.selfLearningBridgeEnabled;
                             this.plugin.settings.selfLearningBridgeEnabled = value;
                             await this.plugin.saveSettings();
                             if (value) {
@@ -17269,18 +19106,10 @@ class AutotagSettingTab extends PluginSettingTab {
                             }
                             this.animateInlineDependencyWarning(selfLearningEnabledWarningHostEl!, renderSelfLearningEnabledWarning);
                             this.animateInlineDependencyWarning(selfLearningDependencyWarningHostEl!, renderSelfLearningDependencyWarning);
-                            const isEnabled = bridgeRulesEnabled || value;
-                            if (wasEnabled !== isEnabled) {
-                                if (isEnabled) {
-                                    this.animateSettingsCollapseThenRender(bridgeHowHostEl, renderBridgeHow);
-                                } else {
-                                    this.animateSettingsContent(bridgeHowHostEl, renderBridgeHow);
-                                }
-                            }
                         }));
             this.setSettingNameWithIcon(
                 selfLearningToggleSetting,
-                "Enable Self-learning Bridge",
+                "Enable Adaptive Vault Matching",
                 this.getSettingsSectionIcon("vault-awareness")
             );
             selfLearningPanelEl.prepend(selfLearningToggleSetting.settingEl);
@@ -17298,7 +19127,7 @@ class AutotagSettingTab extends PluginSettingTab {
             renderSelfLearningBridge();
             if (this.plugin.settings.selfLearningBridgeEnabled) this.forceSettingsBodyOpen(selfLearningHostEl);
 
-            if (bridgeRulesEnabled) new Setting(bridgeBodyEl)
+            new Setting(bridgeDetailsEl)
                 .setName("Hide linguistic features for Bridge Enrichment")
                 .setDesc("Keeps the detailed linguistic feature controls collapsed. The saved feature settings still apply.")
                 .addToggle(toggle => toggle
@@ -17312,14 +19141,12 @@ class AutotagSettingTab extends PluginSettingTab {
                             this.animateSettingsContent(bridgeLinguisticsHostEl, renderBridgeLinguistics);
                         }
                     }));
-            const bridgeLinguisticsHostEl = bridgeBodyEl.createDiv();
+            const bridgeLinguisticsHostEl = bridgeDetailsEl.createDiv();
             const renderBridgeLinguistics = () => this.renderLinguisticFeatureSubsection(bridgeLinguisticsHostEl, "bridge");
-            if (bridgeRulesEnabled) {
-                renderBridgeLinguistics();
-                if (!this.plugin.settings.hideBridgeLinguisticFeatures) this.forceSettingsBodyOpen(bridgeLinguisticsHostEl);
-            }
+            renderBridgeLinguistics();
+            if (!this.plugin.settings.hideBridgeLinguisticFeatures) this.forceSettingsBodyOpen(bridgeLinguisticsHostEl);
 
-            if (bridgeRulesEnabled) new Setting(bridgeBodyEl)
+            new Setting(bridgeDetailsEl)
                 .setName("Bridge rule list")
                 .setDesc("One rule per line, shared by both Bridge engines. Evidence-aware rules ask the AI tag pass whether enabled evidence represents a left-side source concept. Direct expansion runs locally when a left-side source is found in any usable Bridge input. Example: House, Structure => Architecture.")
                 .addTextArea(textArea => {
@@ -17332,50 +19159,22 @@ class AutotagSettingTab extends PluginSettingTab {
                         });
                 });
 
-            bridgeBodyEl.createEl("h4", { text: "Self-learning Bridge" });
-            bridgeBodyEl.appendChild(selfLearningPanelEl);
-
+            renderBridgeDetailsVisibility = () => {
+                if (!bridgeDetailsHostEl || !bridgeDetailsEl) return;
+                bridgeDetailsHostEl.empty();
+                if (this.plugin.settings.bridgeEnabled || this.plugin.settings.manualEnrichmentEnabled) {
+                    bridgeDetailsHostEl.appendChild(bridgeDetailsEl);
+                }
+            };
             this.wrapSubcategoryPanels(bridgeBodyEl);
             this.enhanceInfoDescriptionAnimations(bridgeBodyEl);
+            if (!bridgeRulesEnabled) renderBridgeDetailsVisibility();
         };
         renderBridgeEnabled();
         this.forceSettingsBodyOpen(bridgeHostEl);
         this.createSettingsAnchor(containerEl, 'qol', 'Quality of Life');
 
         containerEl.createEl("h4", { text: "Companion Notes" });
-
-        new Setting(containerEl)
-            .setName("Shutdown Protection")
-            .setDesc(this.plugin.settings.shutdownProtectionEnabled
-                ? "Files in the queue are logged and can be resumed after restart. Performance drain is negligible compared to AI tagging, depending on file amount."
-                : "Warning: When turned off, queued or in-progress processing is not logged and will be lost on shutdown or reload.")
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.shutdownProtectionEnabled)
-                .onChange(async value => {
-                    this.plugin.settings.shutdownProtectionEnabled = value;
-                    if (!value) {
-                        this.plugin.settings.protectedJobs = [];
-                    }
-                    await this.plugin.saveSettings();
-                    this.refreshDisplayAnimated();
-                }));
-
-        containerEl.createEl('p', {
-            text: this.plugin.settings.shutdownProtectionEnabled
-                ? `${this.plugin.settings.protectedJobs.length} unfinished file${this.plugin.settings.protectedJobs.length === 1 ? "" : "s"} currently logged for resume.`
-                : "Enable this if you want Autotag to resume unfinished queued files after an Obsidian reload or shutdown.",
-            cls: 'setting-item-description',
-        });
-
-        new Setting(containerEl)
-            .setName("Auto-process unprocessed files on reload")
-            .setDesc("When enabled, Autotag scans the Base Path after reload and queues watched files that are not already marked processed. Default is off so reloads stay quiet unless you choose a vault-wide catch-up run.")
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.autoProcessUnprocessedOnReload)
-                .onChange(async value => {
-                    this.plugin.settings.autoProcessUnprocessedOnReload = value;
-                    await this.plugin.saveSettings();
-                }));
 
         new Setting(containerEl)
             .setName("Delete linked image/note pair")
@@ -17736,6 +19535,18 @@ class AutotagSettingTab extends PluginSettingTab {
         this.createSettingsAnchor(containerEl, 'fix-recover', 'Fix / Recover');
 
         const recoverUnprocessedBaseFiles = this.plugin.getUnprocessedBaseFiles();
+        const recoverMissingCompanionFiles = this.plugin.getMissingCompanionSourceFiles();
+        const missingCompanionWarningLines = recoverMissingCompanionFiles.length > 0
+            ? [`${recoverMissingCompanionFiles.length} source file${recoverMissingCompanionFiles.length === 1 ? " has" : "s have"} no companion note. Select the source file below and use Process Again so normal Autotag processing recreates the note and its metadata.`]
+            : [];
+        this.renderProblemWarningPanel(
+            containerEl,
+            "autotag-missing-companion-warning",
+            "Missing companion notes",
+            missingCompanionWarningLines,
+            "warning",
+            "Files currently queued or processing are intentionally excluded until their run finishes."
+        );
 
         containerEl.createEl('h4', { text: 'Single File' });
         let reprocessNotePath = "";
@@ -17793,9 +19604,9 @@ class AutotagSettingTab extends PluginSettingTab {
         reprocessFileResult = containerEl.createEl("p", { cls: "setting-item-description" });
         updateReprocessFileSearch("");
 
-        let createCompanionSourcePath = "";
-        let createCompanionResult: HTMLElement;
-        const findCreateCompanionSourceFile = (value: string): TFile | null => {
+        let reprocessSourcePath = "";
+        let reprocessSourceResult: HTMLElement;
+        const findReprocessSourceFile = (value: string): TFile | null => {
             const query = value.trim();
             if (!query) return null;
             return this.plugin.getManualPairImageFiles().find(file =>
@@ -17803,39 +19614,46 @@ class AutotagSettingTab extends PluginSettingTab {
                 || file.name.toLowerCase().includes(query.toLowerCase())
             ) ?? null;
         };
-        const updateCreateCompanionSearch = (value: string) => {
-            const file = findCreateCompanionSourceFile(value);
-            createCompanionSourcePath = file?.path ?? "";
-            createCompanionResult.empty();
+        const updateReprocessSourceSearch = (value: string) => {
+            const file = findReprocessSourceFile(value);
+            reprocessSourcePath = file?.path ?? "";
+            reprocessSourceResult.empty();
             if (!file) {
-                if (value.trim()) createCompanionResult.setText("No image/source file found in the Base Path.");
+                if (value.trim()) reprocessSourceResult.setText("No image/source file found in the Base Path.");
                 return;
             }
             const companionNote = this.plugin.findCompanionNoteForSourceFile(file);
-            createCompanionResult.createDiv({ text: `Source: ${file.path}` });
-            createCompanionResult.createDiv({ text: `Companion: ${companionNote?.path ?? "missing"}` });
+            reprocessSourceResult.createDiv({ text: `Source: ${file.path}` });
+            reprocessSourceResult.createDiv({ text: `Companion: ${companionNote?.path ?? `${this.plugin.getCompanionNotePath(file)} (missing)`}` });
+            reprocessSourceResult.createDiv({ text: `Status: ${getSingleFileStatus(file)}` });
         };
-        new Setting(containerEl)
-            .setName("Create missing companion note for source file")
-            .setDesc("Searches image/source files inside the Base Path and creates the expected companion note only when no companion note exists.")
+        const reprocessSourceSetting = new Setting(containerEl)
+            .setName("Search source file to process again")
+            .setDesc("Runs the selected source file through normal Autotag processing again. If its companion note is missing, the note is recreated before metadata, tags, pairing, and hashes are written.")
             .addText(text => {
-                this.attachTextSuggestions(text.inputEl, this.plugin.getManualPairImageFiles().map(file => this.getPathSuggestionRelativeToRoot(file.path, this.plugin.settings.basePath)));
+                const missingPaths = recoverMissingCompanionFiles.map(file => file.path);
+                const orderedFiles = [
+                    ...recoverMissingCompanionFiles,
+                    ...this.plugin.getManualPairImageFiles().filter(file => !missingPaths.some(path => this.plugin.areVaultPathsSame(path, file.path))),
+                ];
+                this.attachTextSuggestions(text.inputEl, orderedFiles.map(file => this.getPathSuggestionRelativeToRoot(file.path, this.plugin.settings.basePath)));
                 text.setPlaceholder("Anime/Beach.jpg")
-                    .onChange(value => updateCreateCompanionSearch(value));
+                    .onChange(value => updateReprocessSourceSearch(value));
             })
             .addButton(button => button
-                .setButtonText("Create Companion")
+                .setButtonText("Process Again")
                 .setCta()
                 .onClick(async () => {
-                    if (!createCompanionSourcePath) {
+                    if (!reprocessSourcePath) {
                         new Notice("Select an image/source file first.");
                         return;
                     }
-                    await this.plugin.createCompanionNoteForSourceFile(createCompanionSourcePath);
+                    await this.plugin.processSingleFileAgain(reprocessSourcePath);
                     this.refreshDisplayAnimated();
                 }));
-        createCompanionResult = containerEl.createEl("p", { cls: "setting-item-description" });
-        updateCreateCompanionSearch("");
+        reprocessSourceSetting.settingEl.id = "autotag-reprocess-source-file";
+        reprocessSourceResult = containerEl.createEl("p", { cls: "setting-item-description" });
+        updateReprocessSourceSearch("");
 
         containerEl.createEl('h4', { text: 'Existing Vaults' });
 
