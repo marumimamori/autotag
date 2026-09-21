@@ -1,8 +1,6 @@
-# Autotag by Maru
+# Autotag by [Maru](https://marumimamori.me/)
 
 Create and enrich companion notes for files in Obsidian.
-
-Created by [Maru](https://marumimamori.me).
 
 **Current version:** `0.1.1`
 
@@ -32,9 +30,7 @@ Created by [Maru](https://marumimamori.me).
   - Processing behavior, rules, and quality-of-life options
 - Status, health, notices, and contextual warnings
 - Search and recovery tools
-- Context menus when right-clicking a source file or companion note:
-
-![Autotag context menus](docs/images/context-menus.png)
+- Context menus when right-clicking a source file or companion note
 
 ## Install With BRAT
 
@@ -194,6 +190,10 @@ The example also contains `Architecture`. This comes from the manual rule `House
 When **Pre-Bridge terms for Vault Awareness output** is enabled, a fitting manual connection can contribute to Vault Awareness before the term has been written to frontmatter. Otherwise, Bridge rules act as explicit connections between concepts in the form `A => B`.
 
 ![Manual Bridge rule](docs/images/bridge-rules.png)
+
+and here are the context menus
+
+![Autotag context menus](docs/images/context-menus.png)
 
 ## Companion Note Name Tokens
 
