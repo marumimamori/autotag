@@ -3432,12 +3432,14 @@ export default class AutotagPlugin extends Plugin {
     }
 
     async renameFileWithoutLinkedCascade(file: TFile, newPath: string): Promise<TFile | null> {
-        this.deletionCascadePaths.add(file.path);
-        this.suppressDeletedPath(file.path);
+        const oldPath = file.path;
+        this.clearDeletionSuppression(newPath);
+        this.deletionCascadePaths.add(oldPath);
+        this.suppressDeletedPath(oldPath);
         try {
             await this.app.vault.rename(file, newPath);
         } finally {
-            window.setTimeout(() => this.deletePathFromSet(this.deletionCascadePaths, file.path), 1000);
+            window.setTimeout(() => this.deletePathFromSet(this.deletionCascadePaths, oldPath), 1000);
         }
         const renamed = this.getVaultFileByPathFlexible(newPath);
         return renamed instanceof TFile ? renamed : null;
@@ -3521,42 +3523,71 @@ export default class AutotagPlugin extends Plugin {
             ?? this.getPairRecordForNotePath(newNotePath)?.pairId;
         const oldImage = this.getVaultFileByPathFlexible(oldImagePath);
         const oldNote = this.getVaultFileByPathFlexible(oldNotePath);
+        const generatedNoteContent = await this.app.vault.read(note);
+        const updatedNoteContent = this.replaceWikiLinksInContent(generatedNoteContent, [
+            ...this.getLinkReplacementPairs(newImagePath, oldImagePath),
+            ...this.getLinkReplacementPairs(newNotePath, oldNotePath),
+        ]);
 
-        await this.deleteFileWithoutLinkedCascade(oldNote instanceof TFile ? oldNote : null);
         await this.deleteFileWithoutLinkedCascade(oldImage instanceof TFile ? oldImage : null);
-
         const movedImage = await this.renameFileWithoutLinkedCascade(file, oldImagePath);
-        const movedNote = await this.renameFileWithoutLinkedCascade(note, oldNotePath);
-        this.clearDeletionSuppression(oldImagePath);
-        this.clearDeletionSuppression(oldNotePath);
-        if (movedNote instanceof TFile) {
-            const content = await this.app.vault.read(movedNote);
-            const updated = this.replaceWikiLinksInContent(content, [
-                ...this.getLinkReplacementPairs(newImagePath, oldImagePath),
-                ...this.getLinkReplacementPairs(newNotePath, oldNotePath),
-            ]);
-            if (updated !== content) await this.app.vault.modify(movedNote, updated);
-            await this.refreshCompanionSourceFileLinks(movedNote, oldImagePath, [newImagePath]);
+
+        let keptNote: TFile | null = null;
+        if (oldNote instanceof TFile) {
+            if (!this.areVaultPathsSame(oldNote.path, note.path)) {
+                await this.app.vault.modify(oldNote, updatedNoteContent);
+                await this.deleteFileWithoutLinkedCascade(note, runId);
+            }
+            keptNote = oldNote;
+        } else {
+            keptNote = await this.renameFileWithoutLinkedCascade(note, oldNotePath);
+            if (keptNote instanceof TFile && updatedNoteContent !== generatedNoteContent) {
+                await this.app.vault.modify(keptNote, updatedNoteContent);
+            }
+        }
+        if (keptNote instanceof TFile) {
+            await this.refreshCompanionSourceFileLinks(keptNote, oldImagePath, [newImagePath]);
         }
         if (handling.migrateLinks) {
             const changed = await this.migrateDuplicateLinks(newImagePath, newNotePath, oldImagePath, oldNotePath);
             if (changed > 0) new Notice(`Migrated duplicate links in ${changed} note${changed === 1 ? "" : "s"}.`);
         }
 
-        this.cleanupProcessingStateForPath(newImagePath);
-        this.cleanupProcessingStateForPath(newNotePath);
-        this.removeDuplicateRecordsForPath(oldImagePath);
-        this.removeDuplicateRecordsForPath(oldNotePath);
-        this.removePairRecordsForPath(oldImagePath);
-        this.removePairRecordsForPath(oldNotePath);
         if (activePair && runId) {
             this.updateActiveRunPair(runId!, {
                 imagePath: oldImagePath,
                 expectedNotePath: oldNotePath,
                 resolvedNotePath: oldNotePath,
             });
+            this.deletePathKey(this.currentRunIds, newImagePath);
+            this.currentRunIds.set(oldImagePath, runId);
         }
-        this.updatePairRecord(keptPairId, { imagePath: oldImagePath, notePath: oldNotePath });
+        this.settings.duplicateRecords = this.getDuplicateRecords().filter(record =>
+            !this.areVaultPathsSame(record.filePath, oldImagePath)
+            && !this.areVaultPathsSame(record.notePath, oldNotePath)
+            && !this.areVaultPathsSame(record.filePath, newImagePath)
+            && !this.areVaultPathsSame(record.notePath, newNotePath)
+        );
+        this.settings.pairRecords = this.getPairRecords().filter(record =>
+            record.pairId === keptPairId
+            || (
+                !this.areVaultPathsSame(record.imagePath, oldImagePath)
+                && !this.areVaultPathsSame(record.notePath, oldNotePath)
+                && !this.areVaultPathsSame(record.imagePath, newImagePath)
+                && !this.areVaultPathsSame(record.notePath, newNotePath)
+            )
+        );
+        if (keptPairId && this.getPairRecordById(keptPairId)) {
+            this.updatePairRecord(keptPairId, { imagePath: oldImagePath, notePath: oldNotePath });
+        } else {
+            this.upsertPairRecord({
+                pairId: keptPairId ?? this.createPairId(),
+                imagePath: oldImagePath,
+                notePath: oldNotePath,
+                createdAt: Date.now(),
+                updatedAt: Date.now(),
+            });
+        }
         this.upsertDuplicateRecord({
             filePath: oldImagePath,
             notePath: oldNotePath,
@@ -10722,13 +10753,16 @@ ${frontmatterLines}
                 () => this.finalizeDuplicateAction(file, currentCompanionNote, duplicateHandling, runId)
             );
             if (finalDuplicateHandling.action === "delete-new-pair") return;
-            if (this.isUnloading || !this.isCurrentRun(filePath, runId)) return;
             const activePairAfterReplace = this.activeRunPairs.get(runId);
+            const activeRunPath = activePairAfterReplace?.imagePath ?? filePath;
+            if (this.isUnloading || !this.isCurrentRun(activeRunPath, runId)) return;
             const pairRecordAfterReplace = this.getPairRecordById(activePairAfterReplace?.pairId);
             const finalProcessedPath = finalDuplicateHandling.action === "replace-original-keep-original" && finalDuplicateHandling.match
                 ? finalDuplicateHandling.match.record.filePath
-                : pairRecordAfterReplace?.imagePath ?? filePath;
-            const finalNotePath = pairRecordAfterReplace?.notePath ?? currentCompanionNote.path;
+                : pairRecordAfterReplace?.imagePath ?? activeRunPath;
+            const finalNotePath = pairRecordAfterReplace?.notePath
+                ?? activePairAfterReplace?.resolvedNotePath
+                ?? currentCompanionNote.path;
             this.clearFailedFile(filePath);
             this.updatePairRecord(activePairAfterReplace?.pairId, { imagePath: finalProcessedPath, notePath: finalNotePath });
             if (this.isDuplicateProtectionActive() && finalDuplicateHandling.exactHash) {
@@ -10741,9 +10775,10 @@ ${frontmatterLines}
                 });
             }
             this.markDuplicateProcessingComplete(filePath, runId);
-            this.cleanupActiveRunPairsForPath(filePath, runId);
-            if (this.isCurrentRun(filePath, runId)) this.deletePathKey(this.currentRunIds, filePath);
+            this.cleanupActiveRunPairsForPath(activeRunPath, runId);
+            if (this.isCurrentRun(activeRunPath, runId)) this.deletePathKey(this.currentRunIds, activeRunPath);
             this.removeProtectedJob(filePath);
+            if (!this.areVaultPathsSame(filePath, finalProcessedPath)) this.removeProtectedJob(finalProcessedPath);
             if (!this.settings.processedFiles.some(processedPath => this.areVaultPathsSame(processedPath, finalProcessedPath))) {
                 this.settings.processedFiles.push(finalProcessedPath);
             }
@@ -10879,10 +10914,7 @@ ${frontmatterLines}
                 if (file.extension.toLowerCase() === "md") {
                     this.scheduleAutomaticFolderPropertySync();
                 }
-                if (this.deletionCascadePaths.has(filePath)) {
-                    const duplicateActionChanged = this.cancelPendingDuplicateActionsForPath(filePath);
-                    const changed = this.cleanupProcessingStateForPath(filePath);
-                    if (changed || duplicateActionChanged) await this.saveSettings();
+                if (this.hasPathInSet(this.deletionCascadePaths, filePath)) {
                     return;
                 }
 
