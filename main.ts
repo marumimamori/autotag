@@ -476,6 +476,9 @@ class ProcessingTimings {
         const startedAt = Date.now();
         try {
             return await task();
+        } catch (error) {
+            if (error instanceof ProcessingStageError) throw error;
+            throw new ProcessingStageError(stage, error);
         } finally {
             this.add(stage, Date.now() - startedAt);
         }
@@ -495,6 +498,24 @@ class ProcessingTimings {
             total: `${Date.now() - this.startedAt}ms`,
             ...stageDurations,
         });
+    }
+}
+
+class ProcessingStageError extends Error {
+    constructor(readonly stage: string, readonly originalError: unknown) {
+        const detail = originalError instanceof Error
+            ? originalError.message
+            : typeof originalError === "string"
+                ? originalError
+                : (() => {
+                    try {
+                        return JSON.stringify(originalError);
+                    } catch {
+                        return String(originalError);
+                    }
+                })();
+        super(`${stage}: ${detail || "Unknown error"}`);
+        this.name = "ProcessingStageError";
     }
 }
 
@@ -3378,12 +3399,20 @@ export default class AutotagPlugin extends Plugin {
             ...this.getLinkReplacementPairs(oldNotePath, newNotePath),
         ];
         let changedFiles = 0;
-        for (const note of this.app.vault.getMarkdownFiles()) {
-            const content = await this.app.vault.read(note);
-            const updated = this.replaceWikiLinksInContent(content, replacements);
-            if (updated !== content) {
-                await this.app.vault.modify(note, updated);
-                changedFiles += 1;
+        for (const indexedNote of this.app.vault.getMarkdownFiles()) {
+            const note = this.getVaultFileByPathFlexible(indexedNote.path);
+            if (!(note instanceof TFile)) continue;
+            try {
+                const content = await this.app.vault.read(note);
+                const updated = this.replaceWikiLinksInContent(content, replacements);
+                if (updated !== content) {
+                    await this.app.vault.modify(note, updated);
+                    changedFiles += 1;
+                }
+            } catch (error) {
+                const currentNote = this.getVaultFileByPathFlexible(indexedNote.path);
+                if (!(currentNote instanceof TFile)) continue;
+                console.warn("Autotag skipped a note while migrating duplicate links", indexedNote.path, error);
             }
         }
         return changedFiles;
@@ -3481,12 +3510,16 @@ export default class AutotagPlugin extends Plugin {
             ?? this.getPairRecordForNotePath(note.path)?.pairId;
         const oldImage = this.getVaultFileByPathFlexible(oldImagePath);
         const oldNote = this.getVaultFileByPathFlexible(oldNotePath);
-        await this.deleteFileWithoutLinkedCascade(oldNote instanceof TFile ? oldNote : null);
+        const sharesCompanionNote = oldNote instanceof TFile
+            && this.areVaultPathsSame(oldNote.path, note.path);
+        if (!sharesCompanionNote) {
+            await this.deleteFileWithoutLinkedCascade(oldNote instanceof TFile ? oldNote : null);
+        }
         await this.deleteFileWithoutLinkedCascade(oldImage instanceof TFile ? oldImage : null);
         this.cleanupProcessingStateForPath(oldImagePath);
-        this.cleanupProcessingStateForPath(oldNotePath);
+        if (!sharesCompanionNote) this.cleanupProcessingStateForPath(oldNotePath);
         this.removePairRecordsForPath(oldImagePath);
-        this.removePairRecordsForPath(oldNotePath);
+        if (!sharesCompanionNote) this.removePairRecordsForPath(oldNotePath);
         const kept = handling.autorename ? await this.autorenameReplacedDuplicate(file, note) : { file, note };
         if (handling.migrateLinks) {
             const changed = await this.migrateDuplicateLinks(oldImagePath, oldNotePath, kept.file.path, kept.note.path);
@@ -7866,9 +7899,19 @@ export default class AutotagPlugin extends Plugin {
         ];
     }
 
-    getFailureNoticeText(file: TFile, reason: string, attempts: number): string {
+    getFailureStage(reason: string): string | null {
+        const match = reason.match(/^([a-z][a-z0-9-]*):\s/i);
+        return match?.[1]?.replace(/-/g, " ") ?? null;
+    }
+
+    getFailureNoticeText(file: TFile, reason: string, attempts: number, willRetry = false): string {
         const category = this.getFailureCategory(reason);
-        return `Autotag failed (${attempts}/${this.settings.maxProcessingAttempts}): ${category} - ${file.name}`;
+        const stage = this.getFailureStage(reason);
+        if (willRetry) {
+            const waitSeconds = Math.round(this.getRetryWaitMs(attempts) / 1000);
+            return `Autotag attempt ${attempts}/${this.settings.maxProcessingAttempts} failed${stage ? ` during ${stage}` : `: ${category}`}. Retrying in ${waitSeconds}s - ${file.name}`;
+        }
+        return `Autotag failed after ${attempts}/${this.settings.maxProcessingAttempts}${stage ? ` during ${stage}` : `: ${category}`} - ${file.name}`;
     }
 
     buildFailureHelpNoteContent(): string {
@@ -7954,8 +7997,9 @@ export default class AutotagPlugin extends Plugin {
 
         const failedFile = this.getFailedFile(file.path);
         const attempts = failedFile?.attempts ?? 1;
-        new Notice(this.getFailureNoticeText(file, reason, attempts), 8000);
-        if (shouldRetry && attempts < this.settings.maxProcessingAttempts) {
+        const willRetry = shouldRetry && attempts < this.settings.maxProcessingAttempts;
+        new Notice(this.getFailureNoticeText(file, reason, attempts, willRetry), 8000);
+        if (willRetry) {
             await this.sleep(this.getRetryWaitMs(attempts));
             const currentFailure = this.getFailedFile(file.path);
             const currentFile = this.getVaultFileByPathFlexible(file.path);
@@ -10805,6 +10849,12 @@ ${frontmatterLines}
             this.deletePathKey(this.currentRunIds, filePath);
             this.removeProtectedJob(filePath);
             const reason = e instanceof Error ? e.message : String(e);
+            console.error("Autotag processing attempt failed", {
+                file: filePath,
+                runId,
+                reason,
+                error: e,
+            });
             await this.recordProcessingFailure(file, reason);
         } finally {
             this.clearFileBinaryCache(filePath);
